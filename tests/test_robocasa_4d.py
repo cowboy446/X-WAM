@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from evaluation.robocasa_4d import (
-    _repair_urdfpy_lazy_meshes,
+    _urdf_collision_geometries,
     backproject_rgbd,
     fit_predicted_depth_to_metric,
     points_inside_robot,
@@ -19,24 +19,32 @@ from evaluation.robocasa_4d import (
 
 
 class RoboCasa4DTest(unittest.TestCase):
-    def test_repair_urdfpy_lazy_meshes(self):
+    def test_urdf_collision_geometries_handles_cylinder_without_meshes_property(self):
         class Object:
             pass
 
-        primitive = Object()
-        primitive._meshes = None
+        cylinder = Object()
+        cylinder.radius = 0.2
+        cylinder.length = 0.6
         geometry = Object()
-        geometry.geometry = primitive
+        geometry.box = None
+        geometry.cylinder = cylinder
+        geometry.sphere = None
+        geometry.mesh = None
         collision = Object()
         collision.geometry = geometry
+        collision.origin = np.eye(4)
+        collision.name = "arm"
         link = Object()
         link.collisions = [collision]
+        link.name = "link"
         robot = Object()
-        robot.links = [link]
+        robot.link_fk = lambda cfg: {link: np.eye(4)}
 
-        _repair_urdfpy_lazy_meshes(robot)
+        geoms = _urdf_collision_geometries(robot, {})
 
-        self.assertEqual(primitive._meshes, [])
+        self.assertEqual(geoms[0]["type"], 5)
+        np.testing.assert_allclose(geoms[0]["size"], [0.2, 0.3, 0.0])
 
     def test_multiview_4d_shape_validation(self):
         T, V, H, W = 33, 3, 8, 10

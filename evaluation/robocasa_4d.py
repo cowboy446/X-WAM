@@ -228,45 +228,67 @@ def load_urdf_robot_geometries(
     if not path.exists():
         raise FileNotFoundError(f"Robot URDF not found: {path}")
     robot = urdfpy.URDF.load(str(path))
-    _repair_urdfpy_lazy_meshes(robot)
     actuated = {joint.name for joint in robot.actuated_joints}
     sequence = []
     for saved_cfg in urdf_qpos_t:
         # Match PointWorld: provide the seven Panda joints and driving finger
         # joint only. urdfpy derives the Robotiq mimic joints itself.
         cfg = {name: float(value) for name, value in saved_cfg.items() if name in actuated}
-        # This is the same FK convention used by PointWorld's RobotSampler,
-        # but collision meshes are preferable for inside/outside queries.
-        fk = robot.collision_trimesh_fk(cfg=cfg)
-        frame_geoms = []
-        for mesh, base_from_mesh in fk.items():
-            frame_geoms.append({
-                "name": str(mesh.metadata.get("name", mesh.metadata.get("file_name", "urdf_mesh"))),
-                "type": 7,
-                "size": np.zeros(3, dtype=np.float64),
-                "T_base_from_geom": np.asarray(base_from_mesh, dtype=np.float64),
-                "vertices": np.asarray(mesh.vertices, dtype=np.float64),
-            })
-        sequence.append(frame_geoms)
+        sequence.append(_urdf_collision_geometries(robot, cfg))
     return sequence
 
 
-def _repair_urdfpy_lazy_meshes(robot: Any) -> None:
-    """Normalize a broken lazy-load state produced by urdfpy 0.0.22.
-
-    Some modern trimesh / urdfpy combinations leave parsed ``Mesh._meshes``
-    as ``None``.  urdfpy's ``Mesh.meshes`` property nevertheless calls
-    ``len(self._meshes)`` before loading the referenced file, which raises a
-    TypeError.  An empty list is urdfpy's expected not-yet-loaded sentinel.
-    """
-    for link in robot.links:
+def _urdf_collision_geometries(robot: Any, cfg: dict[str, float]) -> list[dict[str, Any]]:
+    """Build collision geoms without urdfpy's broken primitive mesh properties."""
+    frame_geoms = []
+    for link, base_from_link in robot.link_fk(cfg=cfg).items():
         for collision in link.collisions:
-            # Geometry wraps one of Box / Cylinder / Sphere / Mesh.  Primitive
-            # collision objects can hit the same broken state as file meshes,
-            # so repair the selected child rather than only Geometry.mesh.
-            geometry = getattr(collision.geometry, "geometry", None)
-            if geometry is not None and getattr(geometry, "_meshes", None) is None:
-                geometry._meshes = []
+            wrapper = collision.geometry
+            transform = np.asarray(base_from_link, dtype=np.float64) @ np.asarray(
+                collision.origin, dtype=np.float64
+            )
+            name = collision.name or link.name
+            if wrapper.box is not None:
+                frame_geoms.append({
+                    "name": name,
+                    "type": 6,
+                    "size": np.asarray(wrapper.box.size, dtype=np.float64) / 2.0,
+                    "T_base_from_geom": transform,
+                })
+            elif wrapper.cylinder is not None:
+                frame_geoms.append({
+                    "name": name,
+                    "type": 5,
+                    "size": np.array(
+                        [wrapper.cylinder.radius, wrapper.cylinder.length / 2.0, 0.0],
+                        dtype=np.float64,
+                    ),
+                    "T_base_from_geom": transform,
+                })
+            elif wrapper.sphere is not None:
+                frame_geoms.append({
+                    "name": name,
+                    "type": 2,
+                    "size": np.array([wrapper.sphere.radius, 0.0, 0.0], dtype=np.float64),
+                    "T_base_from_geom": transform,
+                })
+            elif wrapper.mesh is not None:
+                meshes = getattr(wrapper.mesh, "_meshes", None)
+                if not meshes:
+                    raise ValueError(f"URDF collision mesh failed to load: {wrapper.mesh.filename}")
+                scale = wrapper.mesh.scale
+                for mesh_index, mesh in enumerate(meshes):
+                    vertices = np.asarray(mesh.vertices, dtype=np.float64).copy()
+                    if scale is not None:
+                        vertices *= np.asarray(scale, dtype=np.float64)
+                    frame_geoms.append({
+                        "name": f"{name}_{mesh_index}",
+                        "type": 7,
+                        "size": np.zeros(3, dtype=np.float64),
+                        "T_base_from_geom": transform,
+                        "vertices": vertices,
+                    })
+    return frame_geoms
 
 
 def points_inside_robot(
