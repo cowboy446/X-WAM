@@ -3,6 +3,7 @@
 .vscode/
 CLAUDE.md
 
+.datasets/
 *.sh
 experiments/
 eval_results/
