@@ -111,14 +111,15 @@ python evaluation/robocasa_client.py \
     --capture_4d \
     --capture_stride 1 \
     --robot_urdf ../PointWorld/assets/franka_description/franka_panda_robotiq_2f85.urdf \
-    --robot_padding 0.008
+    --robot_mask_depth_tolerance 0.03 \
+    --robot_mask_dilation_pixels 2
 ```
 
-Every captured frame stores simulator and robot `qpos`. During the rollout only
-the full point cloud is written. After `env.close()`, an isolated subprocess
-runs URDF FK and writes the `robot/` and `environment/` subsets, preventing
-URDF / trimesh dependencies and heavy point processing from affecting MuJoCo
-rendering. Passing an empty `--robot_urdf` disables splitting.
+Every captured frame stores simulator and robot `qpos`. After each chunk, an
+isolated subprocess runs URDF FK, raycasts the visual mesh into every camera,
+matches rendered and observed depth, and reconstructs `full`, `robot`, and
+`environment` point clouds from the resulting pixel masks. Passing an empty
+`--robot_urdf` disables point-cloud reconstruction and splitting.
 
 After each rollout, all chunk point clouds are automatically indexed into one
 continuous timeline at `<rollout>_4d/timeline/manifest.json`. Adjacent duplicate

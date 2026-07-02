@@ -174,11 +174,11 @@ def capture_robot_state(env) -> dict[str, Any]:
     }
 
 
-def load_urdf_robot_geometries(
+def load_urdf_visual_triangles(
     urdf_path: str | Path,
     urdf_qpos_t: list[dict[str, float]],
-) -> list[list[dict[str, Any]]]:
-    """Build per-frame collision meshes using PointWorld's urdfpy FK pattern."""
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Return one base-frame visual triangle soup per robot state."""
     # urdfpy 0.0.22 still references NumPy aliases removed in recent releases.
     for alias, value in (("float", float), ("int", int), ("bool", bool)):
         if alias not in np.__dict__:
@@ -187,7 +187,7 @@ def load_urdf_robot_geometries(
         import urdfpy
     except ImportError as exc:
         raise ImportError(
-            "URDF robot splitting requires urdfpy/trimesh; install the PointWorld "
+            "URDF mask projection requires urdfpy/trimesh; install the PointWorld "
             "URDF runtime requirements first"
         ) from exc
 
@@ -196,111 +196,33 @@ def load_urdf_robot_geometries(
         raise FileNotFoundError(f"Robot URDF not found: {path}")
     robot = urdfpy.URDF.load(str(path))
     actuated = {joint.name for joint in robot.actuated_joints}
-    sequence = []
+    sequence: list[tuple[np.ndarray, np.ndarray]] = []
     for saved_cfg in urdf_qpos_t:
-        # Match PointWorld: provide the seven Panda joints and driving finger
-        # joint only. urdfpy derives the Robotiq mimic joints itself.
         cfg = {name: float(value) for name, value in saved_cfg.items() if name in actuated}
-        sequence.append(_urdf_collision_geometries(robot, cfg))
-    return sequence
-
-
-def _urdf_collision_geometries(robot: Any, cfg: dict[str, float]) -> list[dict[str, Any]]:
-    """Build collision geoms without urdfpy's broken primitive mesh properties."""
-    frame_geoms = []
-    for link, base_from_link in robot.link_fk(cfg=cfg).items():
-        for collision in link.collisions:
-            wrapper = collision.geometry
-            transform = np.asarray(base_from_link, dtype=np.float64) @ np.asarray(
-                collision.origin, dtype=np.float64
-            )
-            name = collision.name or link.name
-            if wrapper.box is not None:
-                frame_geoms.append({
-                    "name": name,
-                    "type": 6,
-                    "size": np.asarray(wrapper.box.size, dtype=np.float64) / 2.0,
-                    "T_base_from_geom": transform,
-                })
-            elif wrapper.cylinder is not None:
-                frame_geoms.append({
-                    "name": name,
-                    "type": 5,
-                    "size": np.array(
-                        [wrapper.cylinder.radius, wrapper.cylinder.length / 2.0, 0.0],
-                        dtype=np.float64,
-                    ),
-                    "T_base_from_geom": transform,
-                })
-            elif wrapper.sphere is not None:
-                frame_geoms.append({
-                    "name": name,
-                    "type": 2,
-                    "size": np.array([wrapper.sphere.radius, 0.0, 0.0], dtype=np.float64),
-                    "T_base_from_geom": transform,
-                })
-            elif wrapper.mesh is not None:
-                meshes = getattr(wrapper.mesh, "_meshes", None)
-                if not meshes:
-                    raise ValueError(f"URDF collision mesh failed to load: {wrapper.mesh.filename}")
-                scale = wrapper.mesh.scale
-                for mesh_index, mesh in enumerate(meshes):
-                    vertices = np.asarray(mesh.vertices, dtype=np.float64).copy()
+        vertices, triangles, vertex_offset = [], [], 0
+        for link, base_from_link in robot.link_fk(cfg=cfg).items():
+            for visual in link.visuals:
+                mesh_spec = visual.geometry.mesh
+                if mesh_spec is None:
+                    continue
+                transform = np.asarray(base_from_link) @ np.asarray(visual.origin)
+                scale = mesh_spec.scale
+                for mesh in getattr(mesh_spec, "_meshes", None) or []:
+                    local_vertices = np.asarray(mesh.vertices, dtype=np.float64).copy()
                     if scale is not None:
-                        vertices *= np.asarray(scale, dtype=np.float64)
-                    frame_geoms.append({
-                        "name": f"{name}_{mesh_index}",
-                        "type": 7,
-                        "size": np.zeros(3, dtype=np.float64),
-                        "T_base_from_geom": transform,
-                        "vertices": vertices,
-                    })
-    return frame_geoms
-
-
-def points_inside_robot(
-    xyz: np.ndarray,
-    robot_geoms: list[dict[str, Any]],
-    padding: float = 0.008,
-) -> np.ndarray:
-    """Return a mask for points inside (or just on) robot collision geometry.
-
-    MuJoCo geom type values are stable: sphere=2, capsule=3, ellipsoid=4,
-    cylinder=5, box=6, mesh=7. Mesh geoms use their convex hull equations;
-    robot collision meshes are conventionally convex pieces.
-    """
-    points = np.asarray(xyz, dtype=np.float64)
-    inside = np.zeros(len(points), dtype=bool)
-    for geom in robot_geoms:
-        if inside.all():
-            break
-        T = np.asarray(geom["T_base_from_geom"], dtype=np.float64)
-        local = (points[~inside] - T[:3, 3]) @ T[:3, :3]
-        size = np.asarray(geom["size"], dtype=np.float64)
-        geom_type = int(geom["type"])
-        if geom_type == 2:  # sphere
-            hit = np.linalg.norm(local, axis=1) <= size[0] + padding
-        elif geom_type == 3:  # capsule, axis is local z
-            dz = np.maximum(np.abs(local[:, 2]) - size[1], 0.0)
-            hit = np.sqrt(local[:, 0] ** 2 + local[:, 1] ** 2 + dz ** 2) <= size[0] + padding
-        elif geom_type == 4:  # ellipsoid
-            hit = np.sum((local / (size + padding)) ** 2, axis=1) <= 1.0
-        elif geom_type == 5:  # cylinder, radius + half-height
-            hit = (np.linalg.norm(local[:, :2], axis=1) <= size[0] + padding) & (
-                np.abs(local[:, 2]) <= size[1] + padding
-            )
-        elif geom_type == 6:  # box half extents
-            hit = np.all(np.abs(local) <= size + padding, axis=1)
-        elif geom_type == 7 and len(geom.get("vertices", [])) >= 4:
-            from scipy.spatial import ConvexHull
-
-            hull = ConvexHull(np.asarray(geom["vertices"], dtype=np.float64))
-            hit = np.all(local @ hull.equations[:, :3].T + hull.equations[:, 3] <= padding, axis=1)
-        else:
-            continue
-        remaining = np.flatnonzero(~inside)
-        inside[remaining[hit]] = True
-    return inside
+                        local_vertices *= np.asarray(scale, dtype=np.float64)
+                    homogeneous = np.concatenate(
+                        [local_vertices, np.ones((len(local_vertices), 1))], axis=1
+                    )
+                    world_vertices = (homogeneous @ transform.T)[:, :3]
+                    faces = np.asarray(mesh.faces, dtype=np.int32)
+                    vertices.append(world_vertices.astype(np.float32))
+                    triangles.append(faces + vertex_offset)
+                    vertex_offset += len(world_vertices)
+        if not vertices:
+            raise ValueError(f"URDF has no visual triangle meshes: {path}")
+        sequence.append((np.concatenate(vertices), np.concatenate(triangles)))
+    return sequence
 
 
 def fit_predicted_depth_to_metric(
@@ -368,6 +290,7 @@ def backproject_rgbd(
     stride: int = 2,
     min_depth: float = 0.05,
     max_depth: float = 10.0,
+    pixel_mask_vhw: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Fuse calibrated multi-view RGB-D into a base-frame colored point cloud."""
     rgb = np.asarray(rgb_vhwc)
@@ -385,6 +308,8 @@ def backproject_rgbd(
         vv, uu = np.mgrid[0:h:stride, 0:w:stride]
         z = depth[view, ::stride, ::stride]
         valid = np.isfinite(z) & (z > min_depth) & (z < max_depth)
+        if pixel_mask_vhw is not None:
+            valid &= np.asarray(pixel_mask_vhw[view], dtype=bool)[::stride, ::stride]
         fx, fy = K[view, 0, 0], K[view, 1, 1]
         cx, cy = K[view, 0, 2], K[view, 1, 2]
         x = (uu - cx) * z / fx
@@ -464,8 +389,7 @@ def save_pointcloud_sequence(
     stride: int,
     timestamps_s: np.ndarray | None = None,
     action_offsets: np.ndarray | None = None,
-    robot_geoms_t: list[list[dict[str, Any]]] | None = None,
-    robot_padding: float = 0.008,
+    robot_masks_t_vhw: np.ndarray | None = None,
 ) -> None:
     """Save one fused PLY and compressed NPZ per time step."""
     directory = Path(directory)
@@ -479,8 +403,8 @@ def save_pointcloud_sequence(
         raise ValueError("timestamps_s length must match point-cloud frame count")
     if action_offsets is not None and len(action_offsets) != frame_count:
         raise ValueError("action_offsets length must match point-cloud frame count")
-    if robot_geoms_t is not None and len(robot_geoms_t) != frame_count:
-        raise ValueError("robot_geoms_t length must match point-cloud frame count")
+    if robot_masks_t_vhw is not None and len(robot_masks_t_vhw) != frame_count:
+        raise ValueError("robot_masks_t_vhw length must match point-cloud frame count")
     manifest = {
         "frame_count": frame_count,
         "stride": stride,
@@ -489,7 +413,7 @@ def save_pointcloud_sequence(
         "files": [],
         "robot_files": [],
         "environment_files": [],
-        "robot_padding_m": robot_padding if robot_geoms_t is not None else None,
+        "robot_mask_method": "urdf_visual_mesh_depth_projection" if robot_masks_t_vhw is not None else None,
     }
     for time_index in range(frame_count):
         xyz, rgb, view_id = backproject_rgbd(
@@ -499,17 +423,28 @@ def save_pointcloud_sequence(
         write_binary_ply(directory / f"{stem}.ply", xyz, rgb)
         np.savez_compressed(directory / f"{stem}.npz", xyz=xyz, rgb=rgb, view_id=view_id)
         manifest["files"].append(f"{stem}.ply")
-        if robot_geoms_t is not None:
-            robot_mask = points_inside_robot(xyz, robot_geoms_t[time_index], padding=robot_padding)
-            for subset, mask, key in (
-                ("robot", robot_mask, "robot_files"),
-                ("environment", ~robot_mask, "environment_files"),
+        if robot_masks_t_vhw is not None:
+            image_robot_mask = np.asarray(robot_masks_t_vhw[time_index], dtype=bool)
+            for subset, image_mask, key in (
+                ("robot", image_robot_mask, "robot_files"),
+                ("environment", ~image_robot_mask, "environment_files"),
             ):
+                subset_xyz, subset_rgb, subset_view_id = backproject_rgbd(
+                    rgb_t_vhwc[time_index],
+                    depth_t_vhw[time_index],
+                    K_t_v33[time_index],
+                    poses_t_v44[time_index],
+                    stride,
+                    pixel_mask_vhw=image_mask,
+                )
                 ply_rel = f"{subset}/{stem}.ply"
                 npz_rel = f"{subset}/{stem}.npz"
-                write_binary_ply(directory / ply_rel, xyz[mask], rgb[mask])
+                write_binary_ply(directory / ply_rel, subset_xyz, subset_rgb)
                 np.savez_compressed(
-                    directory / npz_rel, xyz=xyz[mask], rgb=rgb[mask], view_id=view_id[mask]
+                    directory / npz_rel,
+                    xyz=subset_xyz,
+                    rgb=subset_rgb,
+                    view_id=subset_view_id,
                 )
                 manifest[key].append(ply_rel)
     with (directory / "manifest.json").open("w", encoding="utf-8") as handle:
@@ -523,69 +458,98 @@ def json_dump(path: str | Path, payload: dict[str, Any]) -> None:
         json.dump(payload, handle, indent=2)
 
 
-def split_saved_pointcloud_sequence(
-    directory: str | Path,
-    robot_geoms_t: list[list[dict[str, Any]]],
-    robot_padding: float,
-) -> None:
-    """Split an already-saved full point-cloud sequence without RGB-D rendering."""
-    directory = Path(directory)
-    manifest_path = directory / "manifest.json"
-    with manifest_path.open("r", encoding="utf-8") as handle:
-        manifest = json.load(handle)
-    full_files = manifest.get("files", [])
-    if len(full_files) != len(robot_geoms_t):
-        raise ValueError(
-            f"Geometry/frame mismatch in {directory}: {len(robot_geoms_t)} vs {len(full_files)}"
+def project_urdf_robot_masks(
+    triangle_soups_t: list[tuple[np.ndarray, np.ndarray]],
+    depth_t_vhw: np.ndarray,
+    K_t_v33: np.ndarray,
+    poses_t_v44: np.ndarray,
+    depth_tolerance: float = 0.03,
+    dilation_pixels: int = 2,
+) -> np.ndarray:
+    """Raycast URDF visual meshes and match their depth to observed RGB-D."""
+    import open3d as o3d
+    from scipy.ndimage import binary_dilation
+
+    depth = np.asarray(depth_t_vhw)
+    masks = np.zeros(depth.shape, dtype=bool)
+    for time_index, (vertices, triangles) in enumerate(triangle_soups_t):
+        scene = o3d.t.geometry.RaycastingScene()
+        mesh = o3d.t.geometry.TriangleMesh(
+            o3d.core.Tensor(vertices, dtype=o3d.core.Dtype.Float32),
+            o3d.core.Tensor(triangles, dtype=o3d.core.Dtype.UInt32),
         )
-    manifest["robot_files"] = []
-    manifest["environment_files"] = []
-    manifest["robot_padding_m"] = robot_padding
-    for frame_index, ply_name in enumerate(full_files):
-        stem = Path(ply_name).stem
-        payload = np.load(directory / f"{stem}.npz")
-        xyz = payload["xyz"]
-        rgb = payload["rgb"]
-        view_id = payload["view_id"]
-        robot_mask = points_inside_robot(xyz, robot_geoms_t[frame_index], padding=robot_padding)
-        for subset, mask, key in (
-            ("robot", robot_mask, "robot_files"),
-            ("environment", ~robot_mask, "environment_files"),
-        ):
-            ply_rel = f"{subset}/{stem}.ply"
-            npz_rel = f"{subset}/{stem}.npz"
-            write_binary_ply(directory / ply_rel, xyz[mask], rgb[mask])
-            (directory / subset).mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(
-                directory / npz_rel, xyz=xyz[mask], rgb=rgb[mask], view_id=view_id[mask]
+        scene.add_triangles(mesh)
+        for view_index in range(depth.shape[1]):
+            h, w = depth.shape[-2:]
+            vv, uu = np.mgrid[:h, :w]
+            K = K_t_v33[time_index, view_index]
+            directions_camera = np.stack(
+                [(uu - K[0, 2]) / K[0, 0], (vv - K[1, 2]) / K[1, 1], np.ones((h, w))],
+                axis=-1,
             )
-            manifest[key].append(ply_rel)
-    json_dump(manifest_path, manifest)
+            pose = poses_t_v44[time_index, view_index]
+            directions_base = directions_camera @ pose[:3, :3].T
+            origins = np.broadcast_to(pose[:3, 3], directions_base.shape)
+            rays = np.concatenate([origins, directions_base], axis=-1).astype(np.float32)
+            robot_depth = scene.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy()
+            observed = depth[time_index, view_index]
+            mask = (
+                np.isfinite(robot_depth)
+                & np.isfinite(observed)
+                & (np.abs(observed - robot_depth) <= depth_tolerance)
+            )
+            if dilation_pixels > 0:
+                mask = binary_dilation(mask, iterations=dilation_pixels)
+            masks[time_index, view_index] = mask
+    return masks
 
 
-def postprocess_rollout_urdf(
-    rollout_root: str | Path,
+def postprocess_chunk_urdf(
+    chunk_root: str | Path,
     robot_urdf: str | Path,
-    robot_padding: float = 0.008,
+    depth_tolerance: float = 0.03,
+    dilation_pixels: int = 2,
 ) -> None:
-    """Apply URDF point splitting after simulation has closed."""
-    rollout_root = Path(rollout_root).resolve()
-    for metadata_path in sorted((rollout_root / "chunks").glob("step_*/metadata.json")):
-        with metadata_path.open("r", encoding="utf-8") as handle:
-            metadata = json.load(handle)
-        chunk = metadata_path.parent
-        for source, qpos_key in (
-            ("predicted", "predicted_urdf_qpos"),
-            ("ground_truth", "ground_truth_urdf_qpos"),
-        ):
-            qpos = metadata.get(qpos_key)
-            if qpos is None:
-                raise ValueError(f"Missing {qpos_key} in {metadata_path}")
-            geoms = load_urdf_robot_geometries(robot_urdf, qpos)
-            split_saved_pointcloud_sequence(chunk / source / "pointclouds", geoms, robot_padding)
-        metadata["robot_split_status"] = "complete"
-        metadata["robot_geometry_source"] = str(Path(robot_urdf).expanduser().resolve())
-        json_dump(metadata_path, metadata)
+    """Project URDF masks and reconstruct one completed chunk."""
+    chunk = Path(chunk_root).resolve()
+    metadata_path = chunk / "metadata.json"
+    with metadata_path.open("r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    point_stride = int(metadata["point_stride"])
+    sources = (
+        ("predicted", "predicted_rgbd.npz", "predicted_urdf_qpos"),
+        ("ground_truth", "ground_truth_rgbd.npz", "ground_truth_urdf_qpos"),
+    )
+    qpos_counts = [len(metadata[qpos_key]) for _, _, qpos_key in sources]
+    all_qpos = [cfg for _, _, qpos_key in sources for cfg in metadata[qpos_key]]
+    all_triangles = load_urdf_visual_triangles(robot_urdf, all_qpos)
+    triangle_offset = 0
+    for (source, archive_name, _), qpos_count in zip(sources, qpos_counts):
+        archive = np.load(chunk / archive_name)
+        rgb, depth = archive["rgb"], archive["depth_m"]
+        K, poses = archive["K"], archive["T_base_from_camera"]
+        triangles = all_triangles[triangle_offset : triangle_offset + qpos_count]
+        triangle_offset += qpos_count
+        masks = project_urdf_robot_masks(
+            triangles, depth, K, poses, depth_tolerance, dilation_pixels
+        )
+        save_pointcloud_sequence(
+            chunk / source / "pointclouds",
+            rgb,
+            depth,
+            K,
+            poses,
+            point_stride,
+            timestamps_s=archive["timestamps_s"],
+            action_offsets=archive["action_offsets"] if "action_offsets" in archive else None,
+            robot_masks_t_vhw=masks,
+        )
+        np.savez_compressed(chunk / source / "robot_masks.npz", mask=masks)
+    metadata["robot_split_status"] = "complete"
+    metadata["robot_mask_depth_tolerance_m"] = depth_tolerance
+    metadata["robot_mask_dilation_pixels"] = dilation_pixels
+    metadata["robot_geometry_source"] = str(Path(robot_urdf).expanduser().resolve())
+    json_dump(metadata_path, metadata)
 
 
 def stitch_chunk_pointcloud_timelines(rollout_root: str | Path) -> Path:

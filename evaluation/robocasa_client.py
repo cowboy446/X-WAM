@@ -21,7 +21,6 @@ from evaluation.robocasa_4d import (
     json_dump,
     resize_center_crop_nearest,
     save_depth_sequence,
-    save_pointcloud_sequence,
     save_rgb_video,
     transform_intrinsics_for_resize_crop,
     validate_4d_shapes,
@@ -185,7 +184,6 @@ def save_4d_chunk(
     point_stride,
     model_crop_ratio,
     pred_depth_representation,
-    robot_padding,
     robot_urdf,
 ):
     """Persist predicted/ground-truth RGB-D and reconstruct both 4D sequences."""
@@ -304,7 +302,6 @@ def save_4d_chunk(
         "point_stride": point_stride,
         "coordinate_frame": "robot_base",
         "length_unit": "metre",
-        "robot_point_padding_m": robot_padding,
         "predicted_robot_state_source": "nearest synchronized ground-truth simulator qpos/geometry",
         "robot_geometry_source": os.path.abspath(os.path.expanduser(robot_urdf)) if robot_urdf else None,
         "robot_split_status": "pending_offline" if robot_urdf else "disabled",
@@ -334,27 +331,6 @@ def save_4d_chunk(
         save_depth_sequence(root / "predicted" / "depth_metric" / camera_name, pred_depth_m[:, view_index], video_fps)
     gt_effective_fps = action_fps / np.diff(gt_action_offsets).mean() if len(gt_action_offsets) > 1 else action_fps
     _save_camera_streams(root, "ground_truth", gt_rgb, gt_depth, camera_names, gt_effective_fps)
-
-    save_pointcloud_sequence(
-        root / "predicted" / "pointclouds",
-        pred_rgb,
-        pred_depth_m,
-        pred_K,
-        pred_poses,
-        point_stride,
-        timestamps_s=pred_timestamps_s,
-    )
-    save_pointcloud_sequence(
-        root / "ground_truth" / "pointclouds",
-        gt_rgb,
-        gt_depth,
-        gt_K,
-        gt_poses,
-        point_stride,
-        timestamps_s=gt_timestamps_s,
-        action_offsets=gt_action_offsets,
-    )
-
 
 def create_env(
     env_name,
@@ -431,10 +407,12 @@ class Args:
     model_crop_ratio: float = 0.95
     pred_depth_representation: str = "inverse"
     """Metric conversion for generated depth: inverse (default) or metric."""
-    robot_padding: float = 0.008
-    """Metres added around robot collision geometry when separating points."""
+    robot_mask_depth_tolerance: float = 0.03
+    """Depth tolerance in metres when matching RGB-D pixels to projected URDF mesh."""
+    robot_mask_dilation_pixels: int = 2
+    """Image-space dilation applied to the projected robot mask."""
     robot_urdf: str = "../PointWorld/assets/franka_description/franka_panda_robotiq_2f85.urdf"
-    """Franka URDF used for FK and robot collision meshes; empty uses MuJoCo geoms."""
+    """Franka URDF visual meshes projected into RGB-D views; empty disables reconstruction."""
 
 
 def main(args: Args):
@@ -444,8 +422,8 @@ def main(args: Args):
         raise ValueError("capture_fps and action_fps must be > 0")
     if args.point_stride < 1:
         raise ValueError("point_stride must be >= 1")
-    if args.robot_padding < 0:
-        raise ValueError("robot_padding must be >= 0")
+    if args.robot_mask_depth_tolerance < 0 or args.robot_mask_dilation_pixels < 0:
+        raise ValueError("robot mask tolerance and dilation must be >= 0")
     if args.capture_4d and args.robot_urdf and not os.path.isfile(os.path.expanduser(args.robot_urdf)):
         raise FileNotFoundError(f"robot_urdf does not exist: {args.robot_urdf}")
     if not 0 < args.model_crop_ratio <= 1:
@@ -574,10 +552,25 @@ def main(args: Args):
                     args.point_stride,
                     args.model_crop_ratio,
                     args.pred_depth_representation,
-                    args.robot_padding,
                     args.robot_urdf,
                 )
                 print(f"Saved 4D capture to {rollout_root}")
+                if args.robot_urdf:
+                    postprocess_script = os.path.join(
+                        os.path.dirname(__file__), "postprocess_4d_chunk.py"
+                    )
+                    subprocess.run([
+                        sys.executable,
+                        postprocess_script,
+                        os.path.abspath(rollout_root),
+                        "--robot-urdf",
+                        os.path.abspath(os.path.expanduser(args.robot_urdf)),
+                        "--depth-tolerance",
+                        str(args.robot_mask_depth_tolerance),
+                        "--dilation-pixels",
+                        str(args.robot_mask_dilation_pixels),
+                    ], check=True)
+                    print(f"Saved projected-mask 4D point clouds to {rollout_root}")
 
             if success:
                 break
@@ -590,12 +583,7 @@ def main(args: Args):
             ))
             postprocess_script = os.path.join(os.path.dirname(__file__), "postprocess_4d.py")
             command = [sys.executable, postprocess_script, rollout_4d_root]
-            if args.robot_urdf:
-                command.extend([
-                    "--robot-urdf", os.path.abspath(os.path.expanduser(args.robot_urdf)),
-                    "--robot-padding", str(args.robot_padding),
-                ])
-            print("Starting isolated 4D postprocessing after env.close()")
+            print("Indexing completed chunk point clouds after env.close()")
             subprocess.run(command, check=True)
 
         os.makedirs(f"{args.save_root_dir}/{env_name}", exist_ok=True)

@@ -6,12 +6,9 @@ from pathlib import Path
 import numpy as np
 
 from evaluation.robocasa_4d import (
-    _urdf_collision_geometries,
     backproject_rgbd,
     fit_predicted_depth_to_metric,
-    points_inside_robot,
     save_pointcloud_sequence,
-    split_saved_pointcloud_sequence,
     stitch_chunk_pointcloud_timelines,
     transform_intrinsics_for_resize_crop,
     validate_4d_shapes,
@@ -20,33 +17,6 @@ from evaluation.robocasa_4d import (
 
 
 class RoboCasa4DTest(unittest.TestCase):
-    def test_urdf_collision_geometries_handles_cylinder_without_meshes_property(self):
-        class Object:
-            pass
-
-        cylinder = Object()
-        cylinder.radius = 0.2
-        cylinder.length = 0.6
-        geometry = Object()
-        geometry.box = None
-        geometry.cylinder = cylinder
-        geometry.sphere = None
-        geometry.mesh = None
-        collision = Object()
-        collision.geometry = geometry
-        collision.origin = np.eye(4)
-        collision.name = "arm"
-        link = Object()
-        link.collisions = [collision]
-        link.name = "link"
-        robot = Object()
-        robot.link_fk = lambda cfg: {link: np.eye(4)}
-
-        geoms = _urdf_collision_geometries(robot, {})
-
-        self.assertEqual(geoms[0]["type"], 5)
-        np.testing.assert_allclose(geoms[0]["size"], [0.2, 0.3, 0.0])
-
     def test_multiview_4d_shape_validation(self):
         T, V, H, W = 33, 3, 8, 10
         rgb = np.zeros((T, V, H, W, 3), dtype=np.uint8)
@@ -117,47 +87,22 @@ class RoboCasa4DTest(unittest.TestCase):
             self.assertEqual(manifest["action_offsets"], [0])
             self.assertTrue((root / "sequence" / manifest["files"][0]).exists())
 
-    def test_robot_point_split_box(self):
-        geom = {
-            "type": 6,
-            "size": np.array([0.5, 0.5, 0.5]),
-            "T_base_from_geom": np.eye(4),
-        }
-        xyz = np.array([[0.0, 0.0, 0.0], [0.51, 0.0, 0.0], [2.0, 0.0, 0.0]])
-        np.testing.assert_array_equal(
-            points_inside_robot(xyz, [geom], padding=0.02), [True, True, False]
-        )
-
-    def test_sequence_writes_robot_and_environment_subsets(self):
+    def test_sequence_uses_projected_pixel_mask_for_subsets(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             rgb = np.zeros((1, 1, 1, 2, 3), dtype=np.uint8)
             depth = np.ones((1, 1, 1, 2), dtype=np.float32)
             K = np.eye(3)[None]
             poses = np.eye(4)[None]
-            geom = {"type": 6, "size": np.array([0.1, 0.1, 1.1]), "T_base_from_geom": np.eye(4)}
+            robot_mask = np.array([[[[True, False]]]])
             save_pointcloud_sequence(
-                root, rgb, depth, K, poses, stride=1, robot_geoms_t=[[geom]], robot_padding=0.0
+                root, rgb, depth, K, poses, stride=1, robot_masks_t_vhw=robot_mask
             )
             manifest = json.loads((root / "manifest.json").read_text())
             self.assertTrue((root / manifest["robot_files"][0]).exists())
             self.assertTrue((root / manifest["environment_files"][0]).exists())
             self.assertEqual(len(np.load(root / "robot/frame_0000.npz")["xyz"]), 1)
             self.assertEqual(len(np.load(root / "environment/frame_0000.npz")["xyz"]), 1)
-
-    def test_offline_split_uses_saved_full_pointcloud(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            rgb = np.zeros((1, 1, 1, 2, 3), dtype=np.uint8)
-            depth = np.ones((1, 1, 1, 2), dtype=np.float32)
-            save_pointcloud_sequence(root, rgb, depth, np.eye(3)[None], np.eye(4)[None], stride=1)
-            geom = {"type": 6, "size": np.array([0.1, 0.1, 1.1]), "T_base_from_geom": np.eye(4)}
-
-            split_saved_pointcloud_sequence(root, [[geom]], robot_padding=0.0)
-
-            manifest = json.loads((root / "manifest.json").read_text())
-            self.assertEqual(len(np.load(root / manifest["robot_files"][0].replace(".ply", ".npz"))["xyz"]), 1)
-            self.assertEqual(len(np.load(root / manifest["environment_files"][0].replace(".ply", ".npz"))["xyz"]), 1)
 
     def test_stitch_chunk_timelines_orders_and_deduplicates_boundaries(self):
         with tempfile.TemporaryDirectory() as tmp:
