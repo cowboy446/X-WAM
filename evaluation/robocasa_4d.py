@@ -270,6 +270,8 @@ def save_pointcloud_sequence(
     K_t_v33: np.ndarray,
     poses_t_v44: np.ndarray,
     stride: int,
+    timestamps_s: np.ndarray | None = None,
+    action_offsets: np.ndarray | None = None,
 ) -> None:
     """Save one fused PLY and compressed NPZ per time step."""
     directory = Path(directory)
@@ -279,7 +281,17 @@ def save_pointcloud_sequence(
         K_t_v33 = np.repeat(K_t_v33[None], frame_count, axis=0)
     if poses_t_v44.ndim == 3:
         poses_t_v44 = np.repeat(poses_t_v44[None], frame_count, axis=0)
-    manifest = {"frame_count": frame_count, "stride": stride, "files": []}
+    if timestamps_s is not None and len(timestamps_s) != frame_count:
+        raise ValueError("timestamps_s length must match point-cloud frame count")
+    if action_offsets is not None and len(action_offsets) != frame_count:
+        raise ValueError("action_offsets length must match point-cloud frame count")
+    manifest = {
+        "frame_count": frame_count,
+        "stride": stride,
+        "timestamps_s": None if timestamps_s is None else np.asarray(timestamps_s).tolist(),
+        "action_offsets": None if action_offsets is None else np.asarray(action_offsets).tolist(),
+        "files": [],
+    }
     for time_index in range(frame_count):
         xyz, rgb, view_id = backproject_rgbd(
             rgb_t_vhwc[time_index], depth_t_vhw[time_index], K_t_v33[time_index], poses_t_v44[time_index], stride

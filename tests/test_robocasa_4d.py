@@ -15,6 +15,14 @@ from evaluation.robocasa_4d import (
 
 
 class RoboCasa4DTest(unittest.TestCase):
+    def test_dense_action_timeline_has_initial_plus_post_action_states(self):
+        action_count = 32
+        offsets = np.arange(action_count + 1)
+        timestamps = offsets / 20.0
+        self.assertEqual(len(offsets), 33)
+        self.assertEqual(len(np.diff(offsets)), action_count)
+        np.testing.assert_allclose(np.diff(timestamps), 0.05)
+
     def test_backprojection_identity_camera(self):
         rgb = np.zeros((1, 2, 2, 3), dtype=np.uint8)
         rgb[..., 0] = 255
@@ -54,9 +62,14 @@ class RoboCasa4DTest(unittest.TestCase):
             depth = np.ones((1, 1, 2, 2), dtype=np.float32)
             K = np.eye(3)[None]
             poses = np.eye(4)[None]
-            save_pointcloud_sequence(root / "sequence", rgb, depth, K, poses, stride=1)
+            save_pointcloud_sequence(
+                root / "sequence", rgb, depth, K, poses, stride=1,
+                timestamps_s=np.array([0.0]), action_offsets=np.array([0]),
+            )
             manifest = json.loads((root / "sequence" / "manifest.json").read_text())
             self.assertEqual(manifest["frame_count"], 1)
+            self.assertEqual(manifest["timestamps_s"], [0.0])
+            self.assertEqual(manifest["action_offsets"], [0])
             self.assertTrue((root / "sequence" / manifest["files"][0]).exists())
 
 

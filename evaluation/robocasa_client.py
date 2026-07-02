@@ -170,7 +170,8 @@ def save_4d_chunk(
     executed_actions,
     gt_action_offsets,
     chunk_start_step,
-    capture_fps,
+    video_fps,
+    action_fps,
     point_stride,
     model_crop_ratio,
     pred_depth_representation,
@@ -216,6 +217,9 @@ def save_4d_chunk(
     gt_depth = np.stack([frame["depth_m"] for frame in gt_captures])
     gt_K = np.stack([frame["K"] for frame in gt_captures])
     gt_poses = np.stack([frame["T_base_from_camera"] for frame in gt_captures])
+    gt_action_offsets = np.asarray(gt_action_offsets, dtype=np.int32)
+    gt_timestamps_s = gt_action_offsets.astype(np.float64) / float(action_fps)
+    pred_timestamps_s = np.arange(pred_frames, dtype=np.float64) / float(video_fps)
 
     np.savez_compressed(
         root / "predicted_rgbd.npz",
@@ -229,6 +233,7 @@ def save_4d_chunk(
         proprios=result["proprios"],
         nominal_actions=nominal_actions,
         executed_controller_actions=executed_actions,
+        timestamps_s=pred_timestamps_s,
     )
     np.savez_compressed(
         root / "ground_truth_rgbd.npz",
@@ -237,7 +242,8 @@ def save_4d_chunk(
         K=gt_K,
         T_base_from_camera=gt_poses,
         T_world_from_camera=np.stack([frame["T_world_from_camera"] for frame in gt_captures]),
-        action_offsets=np.asarray(gt_action_offsets, dtype=np.int32),
+        action_offsets=gt_action_offsets,
+        timestamps_s=gt_timestamps_s,
         executed_controller_actions=executed_actions,
     )
     json_dump(root / "metadata.json", {
@@ -251,8 +257,15 @@ def save_4d_chunk(
         "predicted_frame_count": pred_frames,
         "ground_truth_frame_count": len(gt_captures),
         "chunk_start_step": chunk_start_step,
-        "ground_truth_action_offsets": gt_action_offsets,
-        "capture_fps": capture_fps,
+        "ground_truth_action_offsets": gt_action_offsets.tolist(),
+        "video_fps": video_fps,
+        "action_fps": action_fps,
+        "ground_truth_effective_fps": (
+            float(action_fps / np.diff(gt_action_offsets).mean()) if len(gt_action_offsets) > 1 else None
+        ),
+        "ground_truth_is_dense_per_action": bool(
+            len(gt_action_offsets) > 1 and np.all(np.diff(gt_action_offsets) == 1)
+        ),
         "point_stride": point_stride,
         "coordinate_frame": "robot_base",
         "length_unit": "metre",
@@ -270,13 +283,15 @@ def save_4d_chunk(
         "T_world_from_camera": np.stack(
             [frame["T_world_from_camera"] for frame in gt_captures]
         ).tolist(),
-        "action_offsets": gt_action_offsets,
+        "action_offsets": gt_action_offsets.tolist(),
+        "timestamps_s": gt_timestamps_s.tolist(),
     })
 
-    _save_camera_streams(root, "predicted", pred_rgb, pred_depth_raw, camera_names, capture_fps, raw_depth=True)
+    _save_camera_streams(root, "predicted", pred_rgb, pred_depth_raw, camera_names, video_fps, raw_depth=True)
     for view_index, camera_name in enumerate(camera_names):
-        save_depth_sequence(root / "predicted" / "depth_metric" / camera_name, pred_depth_m[:, view_index], capture_fps)
-    _save_camera_streams(root, "ground_truth", gt_rgb, gt_depth, camera_names, capture_fps)
+        save_depth_sequence(root / "predicted" / "depth_metric" / camera_name, pred_depth_m[:, view_index], video_fps)
+    gt_effective_fps = action_fps / np.diff(gt_action_offsets).mean() if len(gt_action_offsets) > 1 else action_fps
+    _save_camera_streams(root, "ground_truth", gt_rgb, gt_depth, camera_names, gt_effective_fps)
 
     save_pointcloud_sequence(
         root / "predicted" / "pointclouds",
@@ -285,6 +300,7 @@ def save_4d_chunk(
         pred_K,
         pred_poses,
         point_stride,
+        timestamps_s=pred_timestamps_s,
     )
     save_pointcloud_sequence(
         root / "ground_truth" / "pointclouds",
@@ -293,6 +309,8 @@ def save_4d_chunk(
         gt_K,
         gt_poses,
         point_stride,
+        timestamps_s=gt_timestamps_s,
+        action_offsets=gt_action_offsets,
     )
 
 
@@ -360,9 +378,12 @@ class Args:
     cfg: float = 0.0
     capture_4d: bool = False
     """Finish X-WAM RGB-D generation and save predicted/ground-truth 4D captures."""
-    capture_stride: int = 4
-    """Simulator action steps between ground-truth RGB-D frames (4 matches X-WAM)."""
+    capture_stride: int = 1
+    """Simulator action steps between ground-truth RGB-D frames (1 exports dense per-action 4D)."""
     capture_fps: float = 5.0
+    """X-WAM generated video frame rate."""
+    action_fps: float = 20.0
+    """Simulator controller/action rate used to timestamp dense ground-truth RGB-D."""
     point_stride: int = 2
     """Pixel stride used when exporting fused point clouds."""
     model_crop_ratio: float = 0.95
@@ -373,6 +394,8 @@ class Args:
 def main(args: Args):
     if args.capture_stride < 1:
         raise ValueError("capture_stride must be >= 1")
+    if args.capture_fps <= 0 or args.action_fps <= 0:
+        raise ValueError("capture_fps and action_fps must be > 0")
     if args.point_stride < 1:
         raise ValueError("point_stride must be >= 1")
     if not 0 < args.model_crop_ratio <= 1:
@@ -497,6 +520,7 @@ def main(args: Args):
                     gt_action_offsets,
                     chunk_start_step,
                     args.capture_fps,
+                    args.action_fps,
                     args.point_stride,
                     args.model_crop_ratio,
                     args.pred_depth_representation,

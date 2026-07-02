@@ -168,8 +168,9 @@ python evaluation/robocasa_client.py \
     --server_port 10086 \
     --save_root_dir ./eval_results/robocasa_4d \
     --capture_4d \
-    --capture_stride 4 \
+    --capture_stride 1 \
     --capture_fps 5 \
+    --action_fps 20 \
     --point_stride 2
 ```
 
@@ -177,6 +178,14 @@ No extra policy-server flag is needed: `capture_4d` is sent with each request.
 Capturing is much slower than policy-only evaluation because the server performs
 all video denoising steps and runs the depth branch. Start with one client and
 one rollout.
+
+With the default `--capture_stride 1`, simulator RGB-D is captured after every
+executed action. A full 32-action chunk therefore exports 33 ground-truth 4D
+states: the initial state at action offset 0 plus one post-action state for each
+offset 1 through 32. X-WAM prediction remains at 9 video states (5 Hz). The
+dense simulator stream is timestamped at the controller rate (20 Hz) and stores
+both `action_offsets` and `timestamps_s`; use `--capture_stride 4` to recover the
+older 9-state, video-rate capture.
 
 For every action chunk the client saves:
 
@@ -199,7 +208,8 @@ For every action chunk the client saves:
 ```
 
 `ground_truth_rgbd.npz` contains RGB, metric depth, intrinsics, camera-to-world
-and camera-to-base transforms for every captured simulator frame.
+and camera-to-base transforms for every captured simulator frame, together with
+the corresponding action offsets and timestamps.
 `predicted_rgbd.npz` contains RGB, raw generated depth, calibrated metric depth,
 predicted camera poses, predicted proprioception and the executed nominal action.
 All exported point clouds use the robot base frame and metres.
