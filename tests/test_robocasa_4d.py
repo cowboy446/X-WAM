@@ -11,6 +11,7 @@ from evaluation.robocasa_4d import (
     fit_predicted_depth_to_metric,
     points_inside_robot,
     save_pointcloud_sequence,
+    split_saved_pointcloud_sequence,
     stitch_chunk_pointcloud_timelines,
     transform_intrinsics_for_resize_crop,
     validate_4d_shapes,
@@ -143,6 +144,20 @@ class RoboCasa4DTest(unittest.TestCase):
             self.assertTrue((root / manifest["environment_files"][0]).exists())
             self.assertEqual(len(np.load(root / "robot/frame_0000.npz")["xyz"]), 1)
             self.assertEqual(len(np.load(root / "environment/frame_0000.npz")["xyz"]), 1)
+
+    def test_offline_split_uses_saved_full_pointcloud(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rgb = np.zeros((1, 1, 1, 2, 3), dtype=np.uint8)
+            depth = np.ones((1, 1, 1, 2), dtype=np.float32)
+            save_pointcloud_sequence(root, rgb, depth, np.eye(3)[None], np.eye(4)[None], stride=1)
+            geom = {"type": 6, "size": np.array([0.1, 0.1, 1.1]), "T_base_from_geom": np.eye(4)}
+
+            split_saved_pointcloud_sequence(root, [[geom]], robot_padding=0.0)
+
+            manifest = json.loads((root / "manifest.json").read_text())
+            self.assertEqual(len(np.load(root / manifest["robot_files"][0].replace(".ply", ".npz"))["xyz"]), 1)
+            self.assertEqual(len(np.load(root / manifest["environment_files"][0].replace(".ply", ".npz"))["xyz"]), 1)
 
     def test_stitch_chunk_timelines_orders_and_deduplicates_boundaries(self):
         with tempfile.TemporaryDirectory() as tmp:

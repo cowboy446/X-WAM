@@ -114,9 +114,11 @@ python evaluation/robocasa_client.py \
     --robot_padding 0.008
 ```
 
-Every captured frame stores simulator and robot `qpos`. Point-cloud frames are
-written once in full and again under `robot/` and `environment/`. Passing an
-empty `--robot_urdf` falls back to RoboCasa's compiled MuJoCo collision geoms.
+Every captured frame stores simulator and robot `qpos`. During the rollout only
+the full point cloud is written. After `env.close()`, an isolated subprocess
+runs URDF FK and writes the `robot/` and `environment/` subsets, preventing
+URDF / trimesh dependencies and heavy point processing from affecting MuJoCo
+rendering. Passing an empty `--robot_urdf` disables splitting.
 
 After each rollout, all chunk point clouds are automatically indexed into one
 continuous timeline at `<rollout>_4d/timeline/manifest.json`. Adjacent duplicate

@@ -128,19 +128,9 @@ def capture_rgbd(env, camera_names: list[str], base2world: np.ndarray, height: i
         rgb, depth_buffer = rendered
         rgb = np.asarray(rgb)[::-1].copy()
         depth_buffer = np.asarray(depth_buffer)[::-1].copy()
-        invalid_depth = ~np.isfinite(depth_buffer) | (depth_buffer < 0.0) | (depth_buffer > 1.0)
-        if invalid_depth.any():
-            print(
-                f"Warning: camera {camera_name} returned {invalid_depth.sum()}/"
-                f"{depth_buffer.size} invalid depth-buffer pixels; dropping them"
-            )
-            depth_buffer = np.nan_to_num(depth_buffer, nan=1.0, posinf=1.0, neginf=0.0)
-            depth_buffer = np.clip(depth_buffer, 0.0, 1.0)
         depth_m = np.asarray(get_real_depth_map(env.sim, depth_buffer), dtype=np.float32)
         if depth_m.ndim == 3 and depth_m.shape[-1] == 1:
             depth_m = depth_m[..., 0]
-            invalid_depth = invalid_depth[..., 0] if invalid_depth.ndim == 3 else invalid_depth
-        depth_m[invalid_depth] = np.nan
 
         K = np.asarray(get_camera_intrinsic_matrix(env.sim, camera_name, height, width), dtype=np.float64)
         T_world_camera = np.asarray(get_camera_extrinsic_matrix(env.sim, camera_name), dtype=np.float64)
@@ -150,7 +140,7 @@ def capture_rgbd(env, camera_names: list[str], base2world: np.ndarray, height: i
         world_from_cameras.append(T_world_camera)
         base_from_cameras.append(base_from_world @ T_world_camera)
 
-    capture = {
+    return {
         "rgb": np.stack(rgbs).astype(np.uint8),
         "depth_m": np.stack(depths).astype(np.float32),
         "K": np.stack(intrinsics),
@@ -158,44 +148,12 @@ def capture_rgbd(env, camera_names: list[str], base2world: np.ndarray, height: i
         "T_base_from_camera": np.stack(base_from_cameras),
         "T_world_from_base": world_from_base,
     }
-    capture.update(capture_robot_state(env, base2world))
-    return capture
 
 
-def capture_robot_state(env, base2world: np.ndarray) -> dict[str, Any]:
-    """Capture simulator qpos and robot collision geometry in the base frame.
-
-    RoboCasa uses MuJoCo XML rather than loading a URDF at evaluation time. Its
-    collision geoms are the already-compiled equivalent of the URDF collision
-    meshes, so recording their poses avoids a second, error-prone model import.
-    """
+def capture_robot_state(env) -> dict[str, Any]:
+    """Capture only joint state; geometry construction is deferred offline."""
     sim = env.sim
-    model, data = sim.model, sim.data
-    prefix = getattr(env.robots[0].robot_model, "naming_prefix", "robot0_")
-    base_from_world = np.linalg.inv(np.asarray(base2world, dtype=np.float64))
-    geoms = []
-    for geom_id in range(int(model.ngeom)):
-        name = model.geom_id2name(geom_id) or ""
-        body_id = int(model.geom_bodyid[geom_id])
-        body_name = model.body_id2name(body_id) or ""
-        if not (name.startswith(prefix) or body_name.startswith(prefix)):
-            continue
-        world_from_geom = np.eye(4, dtype=np.float64)
-        world_from_geom[:3, :3] = np.asarray(data.geom_xmat[geom_id]).reshape(3, 3)
-        world_from_geom[:3, 3] = np.asarray(data.geom_xpos[geom_id])
-        geom = {
-            "name": name or f"geom_{geom_id}",
-            "type": int(model.geom_type[geom_id]),
-            "size": np.asarray(model.geom_size[geom_id], dtype=np.float64).copy(),
-            "T_base_from_geom": base_from_world @ world_from_geom,
-        }
-        data_id = int(model.geom_dataid[geom_id])
-        if data_id >= 0 and hasattr(model, "mesh_vertadr"):
-            start = int(model.mesh_vertadr[data_id])
-            count = int(model.mesh_vertnum[data_id])
-            geom["vertices"] = np.asarray(model.mesh_vert[start : start + count], dtype=np.float64).copy()
-        geoms.append(geom)
-
+    data = sim.data
     robot = env.robots[0]
     indexes = np.asarray(getattr(robot, "_ref_joint_pos_indexes", []), dtype=np.int64)
     robot_qpos = np.asarray(data.qpos[indexes], dtype=np.float64).copy() if indexes.size else np.empty(0)
@@ -213,7 +171,6 @@ def capture_robot_state(env, base2world: np.ndarray) -> dict[str, Any]:
         "robot_qpos": robot_qpos,
         "robot_joint_names": joint_names,
         "urdf_qpos": urdf_qpos,
-        "robot_geoms": geoms,
     }
 
 
@@ -564,6 +521,71 @@ def json_dump(path: str | Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
+
+
+def split_saved_pointcloud_sequence(
+    directory: str | Path,
+    robot_geoms_t: list[list[dict[str, Any]]],
+    robot_padding: float,
+) -> None:
+    """Split an already-saved full point-cloud sequence without RGB-D rendering."""
+    directory = Path(directory)
+    manifest_path = directory / "manifest.json"
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    full_files = manifest.get("files", [])
+    if len(full_files) != len(robot_geoms_t):
+        raise ValueError(
+            f"Geometry/frame mismatch in {directory}: {len(robot_geoms_t)} vs {len(full_files)}"
+        )
+    manifest["robot_files"] = []
+    manifest["environment_files"] = []
+    manifest["robot_padding_m"] = robot_padding
+    for frame_index, ply_name in enumerate(full_files):
+        stem = Path(ply_name).stem
+        payload = np.load(directory / f"{stem}.npz")
+        xyz = payload["xyz"]
+        rgb = payload["rgb"]
+        view_id = payload["view_id"]
+        robot_mask = points_inside_robot(xyz, robot_geoms_t[frame_index], padding=robot_padding)
+        for subset, mask, key in (
+            ("robot", robot_mask, "robot_files"),
+            ("environment", ~robot_mask, "environment_files"),
+        ):
+            ply_rel = f"{subset}/{stem}.ply"
+            npz_rel = f"{subset}/{stem}.npz"
+            write_binary_ply(directory / ply_rel, xyz[mask], rgb[mask])
+            (directory / subset).mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                directory / npz_rel, xyz=xyz[mask], rgb=rgb[mask], view_id=view_id[mask]
+            )
+            manifest[key].append(ply_rel)
+    json_dump(manifest_path, manifest)
+
+
+def postprocess_rollout_urdf(
+    rollout_root: str | Path,
+    robot_urdf: str | Path,
+    robot_padding: float = 0.008,
+) -> None:
+    """Apply URDF point splitting after simulation has closed."""
+    rollout_root = Path(rollout_root).resolve()
+    for metadata_path in sorted((rollout_root / "chunks").glob("step_*/metadata.json")):
+        with metadata_path.open("r", encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        chunk = metadata_path.parent
+        for source, qpos_key in (
+            ("predicted", "predicted_urdf_qpos"),
+            ("ground_truth", "ground_truth_urdf_qpos"),
+        ):
+            qpos = metadata.get(qpos_key)
+            if qpos is None:
+                raise ValueError(f"Missing {qpos_key} in {metadata_path}")
+            geoms = load_urdf_robot_geometries(robot_urdf, qpos)
+            split_saved_pointcloud_sequence(chunk / source / "pointclouds", geoms, robot_padding)
+        metadata["robot_split_status"] = "complete"
+        metadata["robot_geometry_source"] = str(Path(robot_urdf).expanduser().resolve())
+        json_dump(metadata_path, metadata)
 
 
 def stitch_chunk_pointcloud_timelines(rollout_root: str | Path) -> Path:

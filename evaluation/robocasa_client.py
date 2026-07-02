@@ -3,6 +3,7 @@ import sys
 import time
 import json
 import pickle
+import subprocess
 import zmq
 import tyro
 import imageio
@@ -15,14 +16,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from evaluation.robocasa_4d import (
     capture_rgbd,
+    capture_robot_state,
     fit_predicted_depth_to_metric,
     json_dump,
-    load_urdf_robot_geometries,
     resize_center_crop_nearest,
     save_depth_sequence,
     save_pointcloud_sequence,
     save_rgb_video,
-    stitch_chunk_pointcloud_timelines,
     transform_intrinsics_for_resize_crop,
     validate_4d_shapes,
 )
@@ -163,6 +163,13 @@ def _save_camera_streams(root, prefix, rgb_t_vhwc, depth_t_vhw, camera_names, fp
         )
 
 
+def capture_4d_frame(env, camera_names, base2world):
+    """Keep RGB-D rendering unchanged and attach only lightweight joint state."""
+    capture = capture_rgbd(env, camera_names, base2world, height=256, width=256)
+    capture.update(capture_robot_state(env))
+    return capture
+
+
 def save_4d_chunk(
     chunk_root,
     result,
@@ -226,22 +233,12 @@ def save_4d_chunk(
     gt_action_offsets = np.asarray(gt_action_offsets, dtype=np.int32)
     gt_timestamps_s = gt_action_offsets.astype(np.float64) / float(action_fps)
     pred_timestamps_s = np.arange(pred_frames, dtype=np.float64) / float(video_fps)
-    if robot_urdf:
-        gt_robot_geoms = load_urdf_robot_geometries(
-            robot_urdf, [frame["urdf_qpos"] for frame in gt_captures]
-        )
-        robot_geometry_source = os.path.abspath(os.path.expanduser(robot_urdf))
-    else:
-        gt_robot_geoms = [frame["robot_geoms"] for frame in gt_captures]
-        robot_geometry_source = "mujoco_collision_geometries"
-    # Generated frames describe the same future rollout at video timestamps.
-    # Use the nearest synchronized simulator state to separate the imagined
-    # RGB-D points without trying to recover joints from EEF poses via IK.
     pred_action_offsets = pred_timestamps_s * float(action_fps)
     pred_geom_indices = np.abs(
         gt_action_offsets[:, None] - pred_action_offsets[None, :]
     ).argmin(axis=0)
-    pred_robot_geoms = [gt_robot_geoms[index] for index in pred_geom_indices]
+    gt_urdf_qpos = [frame["urdf_qpos"] for frame in gt_captures]
+    pred_urdf_qpos = [gt_urdf_qpos[index] for index in pred_geom_indices]
 
     validate_4d_shapes(pred_rgb, pred_depth_m, pred_K, pred_poses, camera_names, "predicted")
     validate_4d_shapes(
@@ -309,8 +306,11 @@ def save_4d_chunk(
         "length_unit": "metre",
         "robot_point_padding_m": robot_padding,
         "predicted_robot_state_source": "nearest synchronized ground-truth simulator qpos/geometry",
-        "robot_geometry_source": robot_geometry_source,
+        "robot_geometry_source": os.path.abspath(os.path.expanduser(robot_urdf)) if robot_urdf else None,
+        "robot_split_status": "pending_offline" if robot_urdf else "disabled",
         "robot_joint_names": gt_captures[0]["robot_joint_names"],
+        "ground_truth_urdf_qpos": gt_urdf_qpos,
+        "predicted_urdf_qpos": pred_urdf_qpos,
     })
     json_dump(root / "predicted" / "cameras.json", {
         "camera_names": camera_names,
@@ -343,8 +343,6 @@ def save_4d_chunk(
         pred_poses,
         point_stride,
         timestamps_s=pred_timestamps_s,
-        robot_geoms_t=pred_robot_geoms,
-        robot_padding=robot_padding,
     )
     save_pointcloud_sequence(
         root / "ground_truth" / "pointclouds",
@@ -355,8 +353,6 @@ def save_4d_chunk(
         point_stride,
         timestamps_s=gt_timestamps_s,
         action_offsets=gt_action_offsets,
-        robot_geoms_t=gt_robot_geoms,
-        robot_padding=robot_padding,
     )
 
 
@@ -499,7 +495,7 @@ def main(args: Args):
             chunk_start_step = step_i
             initial_capture = None
             if args.capture_4d:
-                initial_capture = capture_rgbd(env, camera_names, base2world, height=256, width=256)
+                initial_capture = capture_4d_frame(env, camera_names, base2world)
                 rgbs_uint8 = initial_capture["rgb"]
                 rgbs = rgbs_uint8.astype(np.float32) / 127.5 - 1.0
                 _, _, eef_states = render_obs(env, camera_names, base2world)
@@ -538,7 +534,7 @@ def main(args: Args):
                 step_i += 1
 
                 if args.capture_4d and (ai + 1) % args.capture_stride == 0:
-                    gt_captures.append(capture_rgbd(env, camera_names, base2world, height=256, width=256))
+                    gt_captures.append(capture_4d_frame(env, camera_names, base2world))
                     gt_action_offsets.append(ai + 1)
 
                 if env._check_success():
@@ -554,7 +550,7 @@ def main(args: Args):
                 # Preserve an early-success / max-step terminal state even when
                 # it does not land exactly on the regular capture stride.
                 if gt_action_offsets[-1] != len(executed_actions):
-                    gt_captures.append(capture_rgbd(env, camera_names, base2world, height=256, width=256))
+                    gt_captures.append(capture_4d_frame(env, camera_names, base2world))
                     gt_action_offsets.append(len(executed_actions))
                 rollout_root = os.path.join(
                     args.save_root_dir,
@@ -586,14 +582,21 @@ def main(args: Args):
             if success:
                 break
 
-        if args.capture_4d:
-            rollout_4d_root = os.path.join(
-                args.save_root_dir, env_name, f"{global_rank}_{rollout_i}_4d"
-            )
-            timeline_manifest = stitch_chunk_pointcloud_timelines(rollout_4d_root)
-            print(f"Saved stitched 4D timeline to {timeline_manifest}")
-
         env.close()
+
+        if args.capture_4d:
+            rollout_4d_root = os.path.abspath(os.path.join(
+                args.save_root_dir, env_name, f"{global_rank}_{rollout_i}_4d"
+            ))
+            postprocess_script = os.path.join(os.path.dirname(__file__), "postprocess_4d.py")
+            command = [sys.executable, postprocess_script, rollout_4d_root]
+            if args.robot_urdf:
+                command.extend([
+                    "--robot-urdf", os.path.abspath(os.path.expanduser(args.robot_urdf)),
+                    "--robot-padding", str(args.robot_padding),
+                ])
+            print("Starting isolated 4D postprocessing after env.close()")
+            subprocess.run(command, check=True)
 
         os.makedirs(f"{args.save_root_dir}/{env_name}", exist_ok=True)
         video_path = (
