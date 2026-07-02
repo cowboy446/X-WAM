@@ -139,7 +139,7 @@ def capture_rgbd(env, camera_names: list[str], base2world: np.ndarray, height: i
         world_from_cameras.append(T_world_camera)
         base_from_cameras.append(base_from_world @ T_world_camera)
 
-    return {
+    capture = {
         "rgb": np.stack(rgbs).astype(np.uint8),
         "depth_m": np.stack(depths).astype(np.float32),
         "K": np.stack(intrinsics),
@@ -147,6 +147,151 @@ def capture_rgbd(env, camera_names: list[str], base2world: np.ndarray, height: i
         "T_base_from_camera": np.stack(base_from_cameras),
         "T_world_from_base": world_from_base,
     }
+    capture.update(capture_robot_state(env, base2world))
+    return capture
+
+
+def capture_robot_state(env, base2world: np.ndarray) -> dict[str, Any]:
+    """Capture simulator qpos and robot collision geometry in the base frame.
+
+    RoboCasa uses MuJoCo XML rather than loading a URDF at evaluation time. Its
+    collision geoms are the already-compiled equivalent of the URDF collision
+    meshes, so recording their poses avoids a second, error-prone model import.
+    """
+    sim = env.sim
+    model, data = sim.model, sim.data
+    prefix = getattr(env.robots[0].robot_model, "naming_prefix", "robot0_")
+    base_from_world = np.linalg.inv(np.asarray(base2world, dtype=np.float64))
+    geoms = []
+    for geom_id in range(int(model.ngeom)):
+        name = model.geom_id2name(geom_id) or ""
+        body_id = int(model.geom_bodyid[geom_id])
+        body_name = model.body_id2name(body_id) or ""
+        if not (name.startswith(prefix) or body_name.startswith(prefix)):
+            continue
+        world_from_geom = np.eye(4, dtype=np.float64)
+        world_from_geom[:3, :3] = np.asarray(data.geom_xmat[geom_id]).reshape(3, 3)
+        world_from_geom[:3, 3] = np.asarray(data.geom_xpos[geom_id])
+        geom = {
+            "name": name or f"geom_{geom_id}",
+            "type": int(model.geom_type[geom_id]),
+            "size": np.asarray(model.geom_size[geom_id], dtype=np.float64).copy(),
+            "T_base_from_geom": base_from_world @ world_from_geom,
+        }
+        data_id = int(model.geom_dataid[geom_id])
+        if data_id >= 0 and hasattr(model, "mesh_vertadr"):
+            start = int(model.mesh_vertadr[data_id])
+            count = int(model.mesh_vertnum[data_id])
+            geom["vertices"] = np.asarray(model.mesh_vert[start : start + count], dtype=np.float64).copy()
+        geoms.append(geom)
+
+    robot = env.robots[0]
+    indexes = np.asarray(getattr(robot, "_ref_joint_pos_indexes", []), dtype=np.int64)
+    robot_qpos = np.asarray(data.qpos[indexes], dtype=np.float64).copy() if indexes.size else np.empty(0)
+    joint_names = list(getattr(robot.robot_model, "joints", []))
+    # Match PointWorld's Franka URDF contract. RoboSuite exposes the seven arm
+    # joints in robot_qpos; the Robotiq controller exposes its driving joint.
+    urdf_qpos = {f"panda_joint{i + 1}": float(value) for i, value in enumerate(robot_qpos[:7])}
+    controller = robot.composite_controller
+    grippers = list(controller.grippers.keys())
+    if grippers:
+        gripper_controller = controller.part_controllers[grippers[0]]
+        urdf_qpos["finger_joint"] = float(np.asarray(gripper_controller.joint_pos).reshape(-1)[0])
+    return {
+        "sim_qpos": np.asarray(data.qpos, dtype=np.float64).copy(),
+        "robot_qpos": robot_qpos,
+        "robot_joint_names": joint_names,
+        "urdf_qpos": urdf_qpos,
+        "robot_geoms": geoms,
+    }
+
+
+def load_urdf_robot_geometries(
+    urdf_path: str | Path,
+    urdf_qpos_t: list[dict[str, float]],
+) -> list[list[dict[str, Any]]]:
+    """Build per-frame collision meshes using PointWorld's urdfpy FK pattern."""
+    # urdfpy 0.0.22 still references NumPy aliases removed in recent releases.
+    for alias, value in (("float", float), ("int", int), ("bool", bool)):
+        if alias not in np.__dict__:
+            setattr(np, alias, value)
+    try:
+        import urdfpy
+    except ImportError as exc:
+        raise ImportError(
+            "URDF robot splitting requires urdfpy/trimesh; install the PointWorld "
+            "URDF runtime requirements first"
+        ) from exc
+
+    path = Path(urdf_path).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"Robot URDF not found: {path}")
+    robot = urdfpy.URDF.load(str(path))
+    actuated = {joint.name for joint in robot.actuated_joints}
+    sequence = []
+    for saved_cfg in urdf_qpos_t:
+        # Match PointWorld: provide the seven Panda joints and driving finger
+        # joint only. urdfpy derives the Robotiq mimic joints itself.
+        cfg = {name: float(value) for name, value in saved_cfg.items() if name in actuated}
+        # This is the same FK convention used by PointWorld's RobotSampler,
+        # but collision meshes are preferable for inside/outside queries.
+        fk = robot.collision_trimesh_fk(cfg=cfg)
+        frame_geoms = []
+        for mesh, base_from_mesh in fk.items():
+            frame_geoms.append({
+                "name": str(mesh.metadata.get("name", mesh.metadata.get("file_name", "urdf_mesh"))),
+                "type": 7,
+                "size": np.zeros(3, dtype=np.float64),
+                "T_base_from_geom": np.asarray(base_from_mesh, dtype=np.float64),
+                "vertices": np.asarray(mesh.vertices, dtype=np.float64),
+            })
+        sequence.append(frame_geoms)
+    return sequence
+
+
+def points_inside_robot(
+    xyz: np.ndarray,
+    robot_geoms: list[dict[str, Any]],
+    padding: float = 0.008,
+) -> np.ndarray:
+    """Return a mask for points inside (or just on) robot collision geometry.
+
+    MuJoCo geom type values are stable: sphere=2, capsule=3, ellipsoid=4,
+    cylinder=5, box=6, mesh=7. Mesh geoms use their convex hull equations;
+    robot collision meshes are conventionally convex pieces.
+    """
+    points = np.asarray(xyz, dtype=np.float64)
+    inside = np.zeros(len(points), dtype=bool)
+    for geom in robot_geoms:
+        if inside.all():
+            break
+        T = np.asarray(geom["T_base_from_geom"], dtype=np.float64)
+        local = (points[~inside] - T[:3, 3]) @ T[:3, :3]
+        size = np.asarray(geom["size"], dtype=np.float64)
+        geom_type = int(geom["type"])
+        if geom_type == 2:  # sphere
+            hit = np.linalg.norm(local, axis=1) <= size[0] + padding
+        elif geom_type == 3:  # capsule, axis is local z
+            dz = np.maximum(np.abs(local[:, 2]) - size[1], 0.0)
+            hit = np.sqrt(local[:, 0] ** 2 + local[:, 1] ** 2 + dz ** 2) <= size[0] + padding
+        elif geom_type == 4:  # ellipsoid
+            hit = np.sum((local / (size + padding)) ** 2, axis=1) <= 1.0
+        elif geom_type == 5:  # cylinder, radius + half-height
+            hit = (np.linalg.norm(local[:, :2], axis=1) <= size[0] + padding) & (
+                np.abs(local[:, 2]) <= size[1] + padding
+            )
+        elif geom_type == 6:  # box half extents
+            hit = np.all(np.abs(local) <= size + padding, axis=1)
+        elif geom_type == 7 and len(geom.get("vertices", [])) >= 4:
+            from scipy.spatial import ConvexHull
+
+            hull = ConvexHull(np.asarray(geom["vertices"], dtype=np.float64))
+            hit = np.all(local @ hull.equations[:, :3].T + hull.equations[:, 3] <= padding, axis=1)
+        else:
+            continue
+        remaining = np.flatnonzero(~inside)
+        inside[remaining[hit]] = True
+    return inside
 
 
 def fit_predicted_depth_to_metric(
@@ -310,6 +455,8 @@ def save_pointcloud_sequence(
     stride: int,
     timestamps_s: np.ndarray | None = None,
     action_offsets: np.ndarray | None = None,
+    robot_geoms_t: list[list[dict[str, Any]]] | None = None,
+    robot_padding: float = 0.008,
 ) -> None:
     """Save one fused PLY and compressed NPZ per time step."""
     directory = Path(directory)
@@ -323,12 +470,17 @@ def save_pointcloud_sequence(
         raise ValueError("timestamps_s length must match point-cloud frame count")
     if action_offsets is not None and len(action_offsets) != frame_count:
         raise ValueError("action_offsets length must match point-cloud frame count")
+    if robot_geoms_t is not None and len(robot_geoms_t) != frame_count:
+        raise ValueError("robot_geoms_t length must match point-cloud frame count")
     manifest = {
         "frame_count": frame_count,
         "stride": stride,
         "timestamps_s": None if timestamps_s is None else np.asarray(timestamps_s).tolist(),
         "action_offsets": None if action_offsets is None else np.asarray(action_offsets).tolist(),
         "files": [],
+        "robot_files": [],
+        "environment_files": [],
+        "robot_padding_m": robot_padding if robot_geoms_t is not None else None,
     }
     for time_index in range(frame_count):
         xyz, rgb, view_id = backproject_rgbd(
@@ -338,6 +490,19 @@ def save_pointcloud_sequence(
         write_binary_ply(directory / f"{stem}.ply", xyz, rgb)
         np.savez_compressed(directory / f"{stem}.npz", xyz=xyz, rgb=rgb, view_id=view_id)
         manifest["files"].append(f"{stem}.ply")
+        if robot_geoms_t is not None:
+            robot_mask = points_inside_robot(xyz, robot_geoms_t[time_index], padding=robot_padding)
+            for subset, mask, key in (
+                ("robot", robot_mask, "robot_files"),
+                ("environment", ~robot_mask, "environment_files"),
+            ):
+                ply_rel = f"{subset}/{stem}.ply"
+                npz_rel = f"{subset}/{stem}.npz"
+                write_binary_ply(directory / ply_rel, xyz[mask], rgb[mask])
+                np.savez_compressed(
+                    directory / npz_rel, xyz=xyz[mask], rgb=rgb[mask], view_id=view_id[mask]
+                )
+                manifest[key].append(ply_rel)
     with (directory / "manifest.json").open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2)
 

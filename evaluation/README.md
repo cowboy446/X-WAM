@@ -100,6 +100,24 @@ python evaluation/robocasa_client.py \
     --save_root_dir ./eval_results/robocasa/
 ```
 
+To export calibrated 4D point clouds and split robot/environment points with
+the same Franka URDF used by PointWorld:
+
+```bash
+pip install urdfpy==0.0.22 --no-deps
+pip install -r environments/requirements_urdfpy_runtime.txt
+
+python evaluation/robocasa_client.py \
+    --capture_4d \
+    --capture_stride 1 \
+    --robot_urdf ../PointWorld/assets/franka_description/franka_panda_robotiq_2f85.urdf \
+    --robot_padding 0.008
+```
+
+Every captured frame stores simulator and robot `qpos`. Point-cloud frames are
+written once in full and again under `robot/` and `environment/`. Passing an
+empty `--robot_urdf` falls back to RoboCasa's compiled MuJoCo collision geoms.
+
 To evaluate all 24 tasks in parallel:
 
 ```bash

@@ -17,6 +17,7 @@ from evaluation.robocasa_4d import (
     capture_rgbd,
     fit_predicted_depth_to_metric,
     json_dump,
+    load_urdf_robot_geometries,
     resize_center_crop_nearest,
     save_depth_sequence,
     save_pointcloud_sequence,
@@ -176,6 +177,8 @@ def save_4d_chunk(
     point_stride,
     model_crop_ratio,
     pred_depth_representation,
+    robot_padding,
+    robot_urdf,
 ):
     """Persist predicted/ground-truth RGB-D and reconstruct both 4D sequences."""
     chunk_root = os.fspath(chunk_root)
@@ -222,6 +225,22 @@ def save_4d_chunk(
     gt_action_offsets = np.asarray(gt_action_offsets, dtype=np.int32)
     gt_timestamps_s = gt_action_offsets.astype(np.float64) / float(action_fps)
     pred_timestamps_s = np.arange(pred_frames, dtype=np.float64) / float(video_fps)
+    if robot_urdf:
+        gt_robot_geoms = load_urdf_robot_geometries(
+            robot_urdf, [frame["urdf_qpos"] for frame in gt_captures]
+        )
+        robot_geometry_source = os.path.abspath(os.path.expanduser(robot_urdf))
+    else:
+        gt_robot_geoms = [frame["robot_geoms"] for frame in gt_captures]
+        robot_geometry_source = "mujoco_collision_geometries"
+    # Generated frames describe the same future rollout at video timestamps.
+    # Use the nearest synchronized simulator state to separate the imagined
+    # RGB-D points without trying to recover joints from EEF poses via IK.
+    pred_action_offsets = pred_timestamps_s * float(action_fps)
+    pred_geom_indices = np.abs(
+        gt_action_offsets[:, None] - pred_action_offsets[None, :]
+    ).argmin(axis=0)
+    pred_robot_geoms = [gt_robot_geoms[index] for index in pred_geom_indices]
 
     validate_4d_shapes(pred_rgb, pred_depth_m, pred_K, pred_poses, camera_names, "predicted")
     validate_4d_shapes(
@@ -248,6 +267,8 @@ def save_4d_chunk(
         nominal_actions=nominal_actions,
         executed_controller_actions=executed_actions,
         timestamps_s=pred_timestamps_s,
+        robot_qpos=np.stack([gt_captures[index]["robot_qpos"] for index in pred_geom_indices]),
+        simulator_qpos=np.stack([gt_captures[index]["sim_qpos"] for index in pred_geom_indices]),
     )
     np.savez_compressed(
         root / "ground_truth_rgbd.npz",
@@ -259,6 +280,8 @@ def save_4d_chunk(
         action_offsets=gt_action_offsets,
         timestamps_s=gt_timestamps_s,
         executed_controller_actions=executed_actions,
+        robot_qpos=np.stack([frame["robot_qpos"] for frame in gt_captures]),
+        simulator_qpos=np.stack([frame["sim_qpos"] for frame in gt_captures]),
     )
     json_dump(root / "metadata.json", {
         "camera_names": camera_names,
@@ -283,6 +306,10 @@ def save_4d_chunk(
         "point_stride": point_stride,
         "coordinate_frame": "robot_base",
         "length_unit": "metre",
+        "robot_point_padding_m": robot_padding,
+        "predicted_robot_state_source": "nearest synchronized ground-truth simulator qpos/geometry",
+        "robot_geometry_source": robot_geometry_source,
+        "robot_joint_names": gt_captures[0]["robot_joint_names"],
     })
     json_dump(root / "predicted" / "cameras.json", {
         "camera_names": camera_names,
@@ -315,6 +342,8 @@ def save_4d_chunk(
         pred_poses,
         point_stride,
         timestamps_s=pred_timestamps_s,
+        robot_geoms_t=pred_robot_geoms,
+        robot_padding=robot_padding,
     )
     save_pointcloud_sequence(
         root / "ground_truth" / "pointclouds",
@@ -325,6 +354,8 @@ def save_4d_chunk(
         point_stride,
         timestamps_s=gt_timestamps_s,
         action_offsets=gt_action_offsets,
+        robot_geoms_t=gt_robot_geoms,
+        robot_padding=robot_padding,
     )
 
 
@@ -403,6 +434,10 @@ class Args:
     model_crop_ratio: float = 0.95
     pred_depth_representation: str = "inverse"
     """Metric conversion for generated depth: inverse (default) or metric."""
+    robot_padding: float = 0.008
+    """Metres added around robot collision geometry when separating points."""
+    robot_urdf: str = "../PointWorld/assets/franka_description/franka_panda_robotiq_2f85.urdf"
+    """Franka URDF used for FK and robot collision meshes; empty uses MuJoCo geoms."""
 
 
 def main(args: Args):
@@ -412,6 +447,10 @@ def main(args: Args):
         raise ValueError("capture_fps and action_fps must be > 0")
     if args.point_stride < 1:
         raise ValueError("point_stride must be >= 1")
+    if args.robot_padding < 0:
+        raise ValueError("robot_padding must be >= 0")
+    if args.capture_4d and args.robot_urdf and not os.path.isfile(os.path.expanduser(args.robot_urdf)):
+        raise FileNotFoundError(f"robot_urdf does not exist: {args.robot_urdf}")
     if not 0 < args.model_crop_ratio <= 1:
         raise ValueError("model_crop_ratio must be in (0, 1]")
     if args.pred_depth_representation not in {"inverse", "metric"}:
@@ -538,6 +577,8 @@ def main(args: Args):
                     args.point_stride,
                     args.model_crop_ratio,
                     args.pred_depth_representation,
+                    args.robot_padding,
+                    args.robot_urdf,
                 )
                 print(f"Saved 4D capture to {rollout_root}")
 

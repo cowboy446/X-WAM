@@ -22,3 +22,15 @@ einops
 lightning
 deepspeed>=0.16.0
 # flash-attn==2.8.3
+
+# Franka URDF forward kinematics and collision-mesh point separation.
+# urdfpy 0.0.22 incorrectly pins networkx==2.2, which is incompatible with
+# modern Python. Install it once without dependencies before this file:
+#   pip install urdfpy==0.0.22 --no-deps
+trimesh
+networkx==3.4.2
+pycollada==0.6
+pyrender>=0.1.20
+lxml
+six
+# pip install urdfpy==0.0.22 --no-deps

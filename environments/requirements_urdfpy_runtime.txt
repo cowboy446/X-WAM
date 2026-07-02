@@ -1,0 +1,11 @@
+# Install urdfpy itself without dependencies first because its package metadata
+# pins the obsolete networkx==2.2:
+#   pip install urdfpy==0.0.22 --no-deps
+#   pip install -r environments/requirements_urdfpy_runtime.txt
+
+trimesh
+networkx==3.4.2
+pycollada==0.6
+pyrender>=0.1.20
+lxml
+six
