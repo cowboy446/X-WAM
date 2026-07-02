@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from evaluation.robocasa_4d import (
+    _repair_urdfpy_lazy_meshes,
     backproject_rgbd,
     fit_predicted_depth_to_metric,
     points_inside_robot,
@@ -18,6 +19,25 @@ from evaluation.robocasa_4d import (
 
 
 class RoboCasa4DTest(unittest.TestCase):
+    def test_repair_urdfpy_lazy_meshes(self):
+        class Object:
+            pass
+
+        mesh = Object()
+        mesh._meshes = None
+        geometry = Object()
+        geometry.mesh = mesh
+        collision = Object()
+        collision.geometry = geometry
+        link = Object()
+        link.collisions = [collision]
+        robot = Object()
+        robot.links = [link]
+
+        _repair_urdfpy_lazy_meshes(robot)
+
+        self.assertEqual(mesh._meshes, [])
+
     def test_multiview_4d_shape_validation(self):
         T, V, H, W = 33, 3, 8, 10
         rgb = np.zeros((T, V, H, W, 3), dtype=np.uint8)

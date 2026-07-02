@@ -228,6 +228,7 @@ def load_urdf_robot_geometries(
     if not path.exists():
         raise FileNotFoundError(f"Robot URDF not found: {path}")
     robot = urdfpy.URDF.load(str(path))
+    _repair_urdfpy_lazy_meshes(robot)
     actuated = {joint.name for joint in robot.actuated_joints}
     sequence = []
     for saved_cfg in urdf_qpos_t:
@@ -248,6 +249,21 @@ def load_urdf_robot_geometries(
             })
         sequence.append(frame_geoms)
     return sequence
+
+
+def _repair_urdfpy_lazy_meshes(robot: Any) -> None:
+    """Normalize a broken lazy-load state produced by urdfpy 0.0.22.
+
+    Some modern trimesh / urdfpy combinations leave parsed ``Mesh._meshes``
+    as ``None``.  urdfpy's ``Mesh.meshes`` property nevertheless calls
+    ``len(self._meshes)`` before loading the referenced file, which raises a
+    TypeError.  An empty list is urdfpy's expected not-yet-loaded sentinel.
+    """
+    for link in robot.links:
+        for collision in link.collisions:
+            mesh = getattr(collision.geometry, "mesh", None)
+            if mesh is not None and getattr(mesh, "_meshes", None) is None:
+                mesh._meshes = []
 
 
 def points_inside_robot(
