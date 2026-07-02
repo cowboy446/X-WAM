@@ -128,9 +128,19 @@ def capture_rgbd(env, camera_names: list[str], base2world: np.ndarray, height: i
         rgb, depth_buffer = rendered
         rgb = np.asarray(rgb)[::-1].copy()
         depth_buffer = np.asarray(depth_buffer)[::-1].copy()
+        invalid_depth = ~np.isfinite(depth_buffer) | (depth_buffer < 0.0) | (depth_buffer > 1.0)
+        if invalid_depth.any():
+            print(
+                f"Warning: camera {camera_name} returned {invalid_depth.sum()}/"
+                f"{depth_buffer.size} invalid depth-buffer pixels; dropping them"
+            )
+            depth_buffer = np.nan_to_num(depth_buffer, nan=1.0, posinf=1.0, neginf=0.0)
+            depth_buffer = np.clip(depth_buffer, 0.0, 1.0)
         depth_m = np.asarray(get_real_depth_map(env.sim, depth_buffer), dtype=np.float32)
         if depth_m.ndim == 3 and depth_m.shape[-1] == 1:
             depth_m = depth_m[..., 0]
+            invalid_depth = invalid_depth[..., 0] if invalid_depth.ndim == 3 else invalid_depth
+        depth_m[invalid_depth] = np.nan
 
         K = np.asarray(get_camera_intrinsic_matrix(env.sim, camera_name, height, width), dtype=np.float64)
         T_world_camera = np.asarray(get_camera_extrinsic_matrix(env.sim, camera_name), dtype=np.float64)
