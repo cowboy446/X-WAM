@@ -152,3 +152,103 @@ wait
 ## Results
 
 Evaluation results (success rates and rollout videos) are saved to the `--save_root_dir` directory.
+
+## X-WAM RGB-D and 4D Capture (RoboCasa)
+
+The normal evaluation path still stops denoising after actions are ready. Add
+`--capture_4d` to one or a small number of RoboCasa clients when validating the
+world-model output. The flag makes the policy server finish all RGB/depth
+denoising steps and returns the structured future prediction to the client.
+
+```bash
+python evaluation/robocasa_client.py \
+    --env_global_rank 0 \
+    --world_size 1 \
+    --num_evals_per_worker 1 \
+    --server_port 10086 \
+    --save_root_dir ./eval_results/robocasa_4d \
+    --capture_4d \
+    --capture_stride 4 \
+    --capture_fps 5 \
+    --point_stride 2
+```
+
+No extra policy-server flag is needed: `capture_4d` is sent with each request.
+Capturing is much slower than policy-only evaluation because the server performs
+all video denoising steps and runs the depth branch. Start with one client and
+one rollout.
+
+For every action chunk the client saves:
+
+```text
+<save_root>/<task>/<rank>_<rollout>_4d/chunks/step_000000/
+├── metadata.json
+├── predicted_rgbd.npz
+├── ground_truth_rgbd.npz
+├── predicted/
+│   ├── rgb/<camera>.mp4
+│   ├── cameras.json
+│   ├── depth/<camera>/{frame_*.png,preview.mp4}       # checkpoint-native raw depth
+│   ├── depth_metric/<camera>/{frame_*.png,preview.mp4}
+│   └── pointclouds/{frame_*.ply,frame_*.npz,manifest.json}
+└── ground_truth/
+    ├── rgb/<camera>.mp4
+    ├── cameras.json
+    ├── depth/<camera>/{frame_*.png,preview.mp4}       # uint16 millimetres
+    └── pointclouds/{frame_*.ply,frame_*.npz,manifest.json}
+```
+
+`ground_truth_rgbd.npz` contains RGB, metric depth, intrinsics, camera-to-world
+and camera-to-base transforms for every captured simulator frame.
+`predicted_rgbd.npz` contains RGB, raw generated depth, calibrated metric depth,
+predicted camera poses, predicted proprioception and the executed nominal action.
+All exported point clouds use the robot base frame and metres.
+
+### Important depth note
+
+The released RoboCasa depth target is a video without a metric-scale sidecar.
+The capture code therefore always preserves `depth_raw` and, by default, fits an
+inverse-depth affine transform against the measured depth at frame 0 separately
+for every view. This same transform is applied to future predicted frames. The
+result is suitable for inspecting temporal 4D consistency, but it must not be
+described as independently metric depth. Calibration coefficients are recorded
+in `metadata.json`. Use `--pred_depth_representation metric` only for a future
+checkpoint whose output is already known to be in metres.
+
+### Blender
+
+Blender can import each `.ply` directly. To create an animated `.blend` where
+one point-cloud object is visible per timeline frame:
+
+```bash
+blender --background \
+    --python evaluation/blender_import_4d.py -- \
+    /path/to/pointclouds \
+    /path/to/output.blend
+```
+
+Blender 4.x uses `bpy.ops.wm.ply_import`. No Blender Python package is installed
+into the X-WAM environment.
+
+### Additional packages
+
+The repository requirements already list all capture dependencies:
+
+- `numpy>=1.23.5,<2`
+- `scipy>=1.13.1`
+- `imageio[ffmpeg]` / `imageio-ffmpeg`
+
+RoboSuite provides the camera calibration and depth-buffer conversion helpers.
+No Open3D, PyTorch3D, Trimesh, or Blender add-on is required. On a minimal
+machine used only to inspect/rebuild saved captures, install:
+
+```bash
+pip install "numpy>=1.23.5,<2" "scipy>=1.13.1" "imageio[ffmpeg]"
+```
+
+The lightweight geometry tests do not import Torch, MuJoCo, RoboCasa, or
+RoboSuite:
+
+```bash
+python -m unittest tests.test_robocasa_4d
+```

@@ -529,7 +529,17 @@ class XWAMRunner(L.LightningModule):
         xt_depth_latents = depth_latents_pred[0] if self.config.use_depth and self.run_depth else None
         return xt_latents, xt_actions, xt_proprios, xt_depth_latents
 
-    def generate(self, rgb, proprio, prompt, seeds=None, early_stop=True, cfg=0.0, run_depth=True):
+    def generate(
+        self,
+        rgb,
+        proprio,
+        prompt,
+        seeds=None,
+        early_stop=True,
+        cfg=0.0,
+        run_depth=True,
+        structured_output=False,
+    ):
         """
         Args:
             rgb: [B, V, C, H, W]
@@ -558,6 +568,38 @@ class XWAMRunner(L.LightningModule):
 
         if early_stop:
             return None, xt_actions, xt_proprios, None
+
+        if structured_output:
+            if early_stop:
+                raise ValueError("structured_output requires early_stop=False so RGB-D denoising can finish")
+            if not (self.config.use_depth and self.run_depth and xt_depth_latents is not None):
+                raise ValueError("structured_output requires config.use_depth=True and run_depth=True")
+
+            # Decode RGB and depth independently. Keeping the modality and view axes
+            # explicit avoids having downstream evaluation code reverse-engineer the
+            # visualization mosaic returned by the legacy path below.
+            modality_latents = torch.stack([xt_latents, xt_depth_latents], dim=0)
+            modality_latents = rearrange(
+                modality_latents,
+                "m b c t v h w -> (m b v) c t h w",
+            )
+            decoded = self.vae.decode(modality_latents)
+            decoded = rearrange(
+                decoded,
+                "(m b v) c t h w -> m b v t h w c",
+                m=2,
+                b=B,
+                v=self.num_views,
+            )
+            decoded = torch.clamp((decoded + 1) * 127.5, 0, 255).byte().cpu().numpy()
+            predictions = {
+                "rgb": decoded[0],
+                # The released RoboCasa depth target is stored as a three-channel
+                # video. Preserve all channels here; metric conversion is performed
+                # explicitly by the capture client and the raw values are always kept.
+                "depth_raw": decoded[1],
+            }
+            return predictions, xt_actions, xt_proprios, xt_depth_latents
 
         if self.config.use_depth and self.run_depth:
             xt_latents = torch.cat([xt_latents, xt_depth_latents], dim=3)

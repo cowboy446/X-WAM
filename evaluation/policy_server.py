@@ -198,12 +198,19 @@ def main(args: Args):
         proprio = torch.from_numpy(proprio_norm).bfloat16().unsqueeze(0).cuda()
 
         t0 = time.time()
+        capture_4d = bool(data.get("capture_4d", False))
         with torch.inference_mode():
-            # pred_videos and xt_depth_latents are only returned when early_stop=True
-            # xt_proprios are only returned when run_depth=True
-            # cfg=0 means no classifier-free guidance
-            pred_videos, xt_actions, xt_proprios, xt_depth_latents = model.generate(
-                rgb, proprio, prompt, seeds=[seed], early_stop=True, cfg=cfg, run_depth=False
+            # Normal evaluation stops as soon as actions are clean. 4D capture
+            # intentionally finishes all video steps and executes the depth branch.
+            predictions, xt_actions, xt_proprios, xt_depth_latents = model.generate(
+                rgb,
+                proprio,
+                prompt,
+                seeds=[seed],
+                early_stop=not capture_4d,
+                cfg=cfg,
+                run_depth=capture_4d,
+                structured_output=capture_4d,
             )
         logging.info(f"Inferred in {time.time() - t0:.2f}s")
 
@@ -220,6 +227,17 @@ def main(args: Args):
             "proprios": xt_proprios_np,
             "actions": xt_actions_np,
         }
+        if capture_4d:
+            # Batch size is one in the broker protocol. uint8 arrays keep the
+            # response compact enough to transfer without lossy video encoding.
+            result["predicted_rgb"] = predictions["rgb"][0]
+            result["predicted_depth_raw"] = predictions["depth_raw"][0]
+            result["prediction_metadata"] = {
+                "depth_encoding": "checkpoint_native_uint8_three_channel",
+                "frame_count": int(predictions["rgb"].shape[2]),
+                "view_count": int(predictions["rgb"].shape[1]),
+                "full_video_denoise_steps": int(config.sample_steps),
+            }
         socket.send_multipart([b"RESULT", client_id, pickle.dumps(result)])
 
         socket.send_multipart([b"READY"])
