@@ -211,6 +211,7 @@ def save_4d_chunk(
         pred_depth_raw,
         reference_depth,
         representation=pred_depth_representation,
+        view_names=camera_names,
     )
     pred_poses = predicted_camera_poses(
         result["proprios"], initial_capture["T_base_from_camera"], camera_names

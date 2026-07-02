@@ -231,6 +231,7 @@ def fit_predicted_depth_to_metric(
     representation: str = "inverse",
     min_depth: float = 0.05,
     max_depth: float = 10.0,
+    view_names: list[str] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Calibrate generated depth using its frame-0 overlap with measured depth.
 
@@ -270,6 +271,18 @@ def fit_predicted_depth_to_metric(
         keep = (xv >= x_lo) & (xv <= x_hi) & (yv >= y_lo) & (yv <= y_hi)
         A = np.stack([xv[keep], np.ones(keep.sum(), dtype=np.float32)], axis=1)
         scale, shift = np.linalg.lstsq(A, yv[keep], rcond=None)[0]
+        fitted_inverse = scale * xv[keep] + shift
+        inverse_rmse = float(np.sqrt(np.mean((fitted_inverse - yv[keep]) ** 2)))
+        fitted_depth = 1.0 / np.maximum(fitted_inverse, 1.0 / max_depth)
+        depth_rmse = float(np.sqrt(np.mean((fitted_depth - z[valid][keep]) ** 2)))
+        view_label = view_names[view] if view_names is not None else str(view)
+        print(
+            "[depth-calibration] "
+            f"view={view_label} index={view} scale={scale:.9g} shift={shift:.9g} "
+            f"valid_pixels={keep.sum()} inverse_rmse={inverse_rmse:.6g} "
+            f"depth_rmse_m={depth_rmse:.6g}",
+            flush=True,
+        )
         inv_depth = scale * raw[:, view] + shift
         depth = 1.0 / np.maximum(inv_depth, 1.0 / max_depth)
         metric[:, view] = np.clip(depth, min_depth, max_depth)
@@ -278,6 +291,8 @@ def fit_predicted_depth_to_metric(
             "scale": float(scale),
             "shift": float(shift),
             "valid_pixels": int(keep.sum()),
+            "inverse_rmse": inverse_rmse,
+            "depth_rmse_m": depth_rmse,
         })
     return metric, {"representation": "inverse_affine", "per_view": calibration}
 
