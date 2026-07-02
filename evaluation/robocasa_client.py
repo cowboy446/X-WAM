@@ -22,6 +22,7 @@ from evaluation.robocasa_4d import (
     save_pointcloud_sequence,
     save_rgb_video,
     transform_intrinsics_for_resize_crop,
+    validate_4d_shapes,
 )
 
 import robocasa
@@ -205,11 +206,12 @@ def save_4d_chunk(
     pred_poses = predicted_camera_poses(
         result["proprios"], initial_capture["T_base_from_camera"], camera_names
     )
-    pred_frames = min(len(pred_rgb), len(pred_depth_m), len(pred_poses))
-    pred_rgb, pred_depth_m, pred_depth_raw, pred_poses = (
-        pred_rgb[:pred_frames], pred_depth_m[:pred_frames], pred_depth_raw[:pred_frames], pred_poses[:pred_frames]
-    )
-    pred_depth_rgb = pred_depth_rgb[:pred_frames]
+    pred_frames = len(pred_rgb)
+    if len(pred_depth_m) != pred_frames or len(pred_poses) != pred_frames:
+        raise ValueError(
+            "Predicted RGB/depth/pose frame counts differ: "
+            f"{pred_frames}/{len(pred_depth_m)}/{len(pred_poses)}"
+        )
     pred_K = np.repeat(transformed_K[None], pred_frames, axis=0)
     pred_world_poses = initial_capture["T_world_from_base"][None, None] @ pred_poses
 
@@ -220,6 +222,18 @@ def save_4d_chunk(
     gt_action_offsets = np.asarray(gt_action_offsets, dtype=np.int32)
     gt_timestamps_s = gt_action_offsets.astype(np.float64) / float(action_fps)
     pred_timestamps_s = np.arange(pred_frames, dtype=np.float64) / float(video_fps)
+
+    validate_4d_shapes(pred_rgb, pred_depth_m, pred_K, pred_poses, camera_names, "predicted")
+    validate_4d_shapes(
+        gt_rgb,
+        gt_depth,
+        gt_K,
+        gt_poses,
+        camera_names,
+        "ground truth",
+        action_offsets=gt_action_offsets,
+        executed_action_count=len(executed_actions),
+    )
 
     np.savez_compressed(
         root / "predicted_rgbd.npz",

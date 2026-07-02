@@ -10,11 +10,25 @@ from evaluation.robocasa_4d import (
     fit_predicted_depth_to_metric,
     save_pointcloud_sequence,
     transform_intrinsics_for_resize_crop,
+    validate_4d_shapes,
     write_binary_ply,
 )
 
 
 class RoboCasa4DTest(unittest.TestCase):
+    def test_multiview_4d_shape_validation(self):
+        T, V, H, W = 33, 3, 8, 10
+        rgb = np.zeros((T, V, H, W, 3), dtype=np.uint8)
+        depth = np.ones((T, V, H, W), dtype=np.float32)
+        K = np.repeat(np.eye(3)[None, None], T * V, axis=0).reshape(T, V, 3, 3)
+        poses = np.repeat(np.eye(4)[None, None], T * V, axis=0).reshape(T, V, 4, 4)
+        validate_4d_shapes(
+            rgb, depth, K, poses, ["left", "right", "wrist"], "test",
+            action_offsets=np.arange(T), executed_action_count=32,
+        )
+        with self.assertRaisesRegex(ValueError, "depth must match"):
+            validate_4d_shapes(rgb, depth[:-1], K, poses, ["left", "right", "wrist"], "test")
+
     def test_dense_action_timeline_has_initial_plus_post_action_states(self):
         action_count = 32
         offsets = np.arange(action_count + 1)

@@ -21,6 +21,44 @@ from typing import Any
 import numpy as np
 
 
+def validate_4d_shapes(
+    rgb,
+    depth,
+    K,
+    poses,
+    camera_names,
+    label,
+    action_offsets=None,
+    executed_action_count=None,
+) -> None:
+    """Fail early when time/view/camera calibration axes are not aligned."""
+    rgb, depth, K, poses = map(np.asarray, (rgb, depth, K, poses))
+    if rgb.ndim != 5 or rgb.shape[-1] != 3:
+        raise ValueError(f"{label} rgb must be [T,V,H,W,3], got {rgb.shape}")
+    if depth.shape != rgb.shape[:-1]:
+        raise ValueError(f"{label} depth must match rgb [T,V,H,W], got {depth.shape} vs {rgb.shape}")
+    time_count, view_count = rgb.shape[:2]
+    if view_count != len(camera_names):
+        raise ValueError(f"{label} has {view_count} views but {len(camera_names)} camera names")
+    if K.shape != (time_count, view_count, 3, 3):
+        raise ValueError(f"{label} K must be [T,V,3,3], got {K.shape}")
+    if poses.shape != (time_count, view_count, 4, 4):
+        raise ValueError(f"{label} poses must be [T,V,4,4], got {poses.shape}")
+    if not np.all(np.isfinite(K)) or not np.all(np.isfinite(poses)):
+        raise ValueError(f"{label} K/poses contain non-finite values")
+    if action_offsets is not None:
+        offsets = np.asarray(action_offsets)
+        if offsets.shape != (time_count,):
+            raise ValueError(f"{label} action_offsets must have one entry per frame, got {offsets.shape}")
+        if offsets[0] != 0 or np.any(np.diff(offsets) <= 0):
+            raise ValueError(f"{label} action_offsets must start at 0 and increase strictly: {offsets}")
+        if executed_action_count is not None and offsets[-1] != executed_action_count:
+            raise ValueError(
+                f"{label} final action offset {offsets[-1]} does not match "
+                f"executed action count {executed_action_count}"
+            )
+
+
 def transform_intrinsics_for_resize_crop(
     K_v33: np.ndarray,
     input_hw: tuple[int, int],
