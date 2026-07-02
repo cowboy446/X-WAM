@@ -261,9 +261,12 @@ def _repair_urdfpy_lazy_meshes(robot: Any) -> None:
     """
     for link in robot.links:
         for collision in link.collisions:
-            mesh = getattr(collision.geometry, "mesh", None)
-            if mesh is not None and getattr(mesh, "_meshes", None) is None:
-                mesh._meshes = []
+            # Geometry wraps one of Box / Cylinder / Sphere / Mesh.  Primitive
+            # collision objects can hit the same broken state as file meshes,
+            # so repair the selected child rather than only Geometry.mesh.
+            geometry = getattr(collision.geometry, "geometry", None)
+            if geometry is not None and getattr(geometry, "_meshes", None) is None:
+                geometry._meshes = []
 
 
 def points_inside_robot(

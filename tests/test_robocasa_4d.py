@@ -23,10 +23,10 @@ class RoboCasa4DTest(unittest.TestCase):
         class Object:
             pass
 
-        mesh = Object()
-        mesh._meshes = None
+        primitive = Object()
+        primitive._meshes = None
         geometry = Object()
-        geometry.mesh = mesh
+        geometry.geometry = primitive
         collision = Object()
         collision.geometry = geometry
         link = Object()
@@ -36,7 +36,7 @@ class RoboCasa4DTest(unittest.TestCase):
 
         _repair_urdfpy_lazy_meshes(robot)
 
-        self.assertEqual(mesh._meshes, [])
+        self.assertEqual(primitive._meshes, [])
 
     def test_multiview_4d_shape_validation(self):
         T, V, H, W = 33, 3, 8, 10
