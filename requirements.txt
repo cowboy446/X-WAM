@@ -33,4 +33,5 @@ pycollada==0.6
 pyrender>=0.1.20
 lxml
 six
+open3d>=0.18.0
 # pip install urdfpy==0.0.22 --no-deps

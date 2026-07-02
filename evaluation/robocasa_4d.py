@@ -15,6 +15,7 @@ computer-vision convention conversion; do not add another axis flip here.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -512,3 +513,61 @@ def json_dump(path: str | Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
+
+
+def stitch_chunk_pointcloud_timelines(rollout_root: str | Path) -> Path:
+    """Index every chunk as continuous predicted/ground-truth timelines.
+
+    Point clouds stay in their chunk directories; the global manifest uses
+    relative paths, so stitching is fast and does not duplicate large PLYs.
+    Duplicate timestamps at adjacent chunk boundaries are collapsed.
+    """
+    rollout_root = Path(rollout_root).resolve()
+    timeline_dir = rollout_root / "timeline"
+    timeline_dir.mkdir(parents=True, exist_ok=True)
+    output: dict[str, Any] = {
+        "version": 1,
+        "rollout_root": "..",
+        "sources": {},
+    }
+    source_dirs = {"imagined": "predicted", "simulation": "ground_truth"}
+    for source_name, disk_name in source_dirs.items():
+        entries_by_time: dict[int, dict[str, Any]] = {}
+        for metadata_path in sorted((rollout_root / "chunks").glob("step_*/metadata.json")):
+            chunk_dir = metadata_path.parent
+            with metadata_path.open("r", encoding="utf-8") as handle:
+                metadata = json.load(handle)
+            manifest_path = chunk_dir / disk_name / "pointclouds" / "manifest.json"
+            if not manifest_path.exists():
+                continue
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                point_manifest = json.load(handle)
+            local_times = point_manifest.get("timestamps_s")
+            if local_times is None:
+                local_times = list(range(int(point_manifest["frame_count"])))
+            start_s = float(metadata["chunk_start_step"]) / float(metadata["action_fps"])
+            for frame_index, local_s in enumerate(local_times):
+                global_s = start_s + float(local_s)
+                # Integer microseconds provide deterministic boundary de-duplication.
+                time_key = int(round(global_s * 1_000_000.0))
+                files = {}
+                for subset, manifest_key in (
+                    ("full", "files"),
+                    ("robot", "robot_files"),
+                    ("environment", "environment_files"),
+                ):
+                    names = point_manifest.get(manifest_key, [])
+                    if frame_index < len(names):
+                        path = manifest_path.parent / names[frame_index]
+                        files[subset] = os.path.relpath(path, timeline_dir)
+                entries_by_time[time_key] = {
+                    "time_s": global_s,
+                    "chunk_start_step": int(metadata["chunk_start_step"]),
+                    "local_frame": frame_index,
+                    "files": files,
+                }
+        output["sources"][source_name] = [entries_by_time[key] for key in sorted(entries_by_time)]
+    output["frame_counts"] = {name: len(entries) for name, entries in output["sources"].items()}
+    manifest_path = timeline_dir / "manifest.json"
+    json_dump(manifest_path, output)
+    return manifest_path

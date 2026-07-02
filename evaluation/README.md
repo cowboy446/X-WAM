@@ -118,6 +118,19 @@ Every captured frame stores simulator and robot `qpos`. Point-cloud frames are
 written once in full and again under `robot/` and `environment/`. Passing an
 empty `--robot_urdf` falls back to RoboCasa's compiled MuJoCo collision geoms.
 
+After each rollout, all chunk point clouds are automatically indexed into one
+continuous timeline at `<rollout>_4d/timeline/manifest.json`. Adjacent duplicate
+boundary frames are removed. Open the timeline locally with:
+
+```bash
+python evaluation/view_4d_timeline.py \
+    eval_results/robocasa/<task>/0_0_4d
+```
+
+The window has a time slider and selectors for `imagined` / `simulation` and
+`full` / `robot` / `environment` point clouds. The manifest references the
+existing chunk PLY files, so stitching does not copy the point-cloud data.
+
 To evaluate all 24 tasks in parallel:
 
 ```bash

@@ -10,6 +10,7 @@ from evaluation.robocasa_4d import (
     fit_predicted_depth_to_metric,
     points_inside_robot,
     save_pointcloud_sequence,
+    stitch_chunk_pointcloud_timelines,
     transform_intrinsics_for_resize_crop,
     validate_4d_shapes,
     write_binary_ply,
@@ -114,6 +115,33 @@ class RoboCasa4DTest(unittest.TestCase):
             self.assertTrue((root / manifest["environment_files"][0]).exists())
             self.assertEqual(len(np.load(root / "robot/frame_0000.npz")["xyz"]), 1)
             self.assertEqual(len(np.load(root / "environment/frame_0000.npz")["xyz"]), 1)
+
+    def test_stitch_chunk_timelines_orders_and_deduplicates_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rollout = Path(tmp) / "0_0_4d"
+            for start in (0, 4):
+                chunk = rollout / "chunks" / f"step_{start:06d}"
+                (chunk / "predicted/pointclouds/environment").mkdir(parents=True)
+                (chunk / "ground_truth/pointclouds/environment").mkdir(parents=True)
+                (chunk / "metadata.json").write_text(json.dumps({
+                    "chunk_start_step": start, "action_fps": 2.0,
+                }))
+                pc_manifest = {
+                    "frame_count": 3,
+                    "timestamps_s": [0.0, 1.0, 2.0],
+                    "files": [f"frame_{i:04d}.ply" for i in range(3)],
+                    "robot_files": [],
+                    "environment_files": [f"environment/frame_{i:04d}.ply" for i in range(3)],
+                }
+                for source in ("predicted", "ground_truth"):
+                    (chunk / source / "pointclouds/manifest.json").write_text(json.dumps(pc_manifest))
+            manifest_path = stitch_chunk_pointcloud_timelines(rollout)
+            manifest = json.loads(manifest_path.read_text())
+            self.assertEqual(manifest["frame_counts"], {"imagined": 5, "simulation": 5})
+            self.assertEqual(
+                [frame["time_s"] for frame in manifest["sources"]["imagined"]],
+                [0.0, 1.0, 2.0, 3.0, 4.0],
+            )
 
 
 if __name__ == "__main__":

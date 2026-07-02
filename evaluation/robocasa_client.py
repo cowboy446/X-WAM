@@ -22,6 +22,7 @@ from evaluation.robocasa_4d import (
     save_depth_sequence,
     save_pointcloud_sequence,
     save_rgb_video,
+    stitch_chunk_pointcloud_timelines,
     transform_intrinsics_for_resize_crop,
     validate_4d_shapes,
 )
@@ -584,6 +585,13 @@ def main(args: Args):
 
             if success:
                 break
+
+        if args.capture_4d:
+            rollout_4d_root = os.path.join(
+                args.save_root_dir, env_name, f"{global_rank}_{rollout_i}_4d"
+            )
+            timeline_manifest = stitch_chunk_pointcloud_timelines(rollout_4d_root)
+            print(f"Saved stitched 4D timeline to {timeline_manifest}")
 
         env.close()
 
