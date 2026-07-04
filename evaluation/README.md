@@ -242,18 +242,20 @@ For every action chunk the client saves:
 │   ├── cameras.json
 │   ├── depth/<camera>/{frame_*.png,preview.mp4}       # checkpoint-native raw depth
 │   ├── depth_metric/<camera>/{frame_*.png,preview.mp4}
-│   └── pointclouds/{frame_*.ply,frame_*/frame_*_{left,right,eye_in_hand}.ply,frame_*.npz,manifest.json}
+│   └── pointclouds/{frame_*.ply,frame_*/frame_*_<camera>.ply,frame_*.npz,manifest.json}
 └── ground_truth/
     ├── rgb/<camera>.mp4
     ├── cameras.json
     ├── depth/<camera>/{frame_*.png,preview.mp4}       # uint16 millimetres
-    └── pointclouds/{frame_*.ply,frame_*/frame_*_{left,right,eye_in_hand}.ply,frame_*.npz,manifest.json}
+    └── pointclouds/{frame_*.ply,frame_*/frame_*_<camera>.ply,frame_*.npz,manifest.json}
 ```
 
 The unsuffixed PLY fuses all cameras. Each `frame_NNNN/` directory contains that
 frame's three camera-specific PLY files, which can be loaded as separate MeshLab
 layers. The same layout is used in the `robot/` and `environment/` point-cloud
-subdirectories.
+subdirectories. Camera suffixes come from the captured `camera_names` metadata
+(for example, `frame_0000_robot0_agentview_left.ply`) rather than a hard-coded
+alias list.
 
 `ground_truth_rgbd.npz` contains RGB, metric depth, intrinsics, camera-to-world
 and camera-to-base transforms for every captured simulator frame, together with

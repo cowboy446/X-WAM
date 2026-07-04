@@ -134,12 +134,13 @@ class RoboCasa4DTest(unittest.TestCase):
             self.assertTrue((root / manifest["environment_files"][0]).exists())
             self.assertEqual(len(np.load(root / "robot/frame_0000.npz")["xyz"]), 1)
             self.assertEqual(len(np.load(root / "environment/frame_0000.npz")["xyz"]), 1)
-            self.assertTrue((root / "frame_0000/frame_0000_left.ply").exists())
-            self.assertTrue((root / "robot/frame_0000/frame_0000_left.ply").exists())
-            self.assertTrue((root / "environment/frame_0000/frame_0000_left.ply").exists())
+            filename = "frame_0000_robot0_agentview_left.ply"
+            self.assertTrue((root / "frame_0000" / filename).exists())
+            self.assertTrue((root / "robot/frame_0000" / filename).exists())
+            self.assertTrue((root / "environment/frame_0000" / filename).exists())
             self.assertEqual(
-                manifest["view_files"][0]["left"],
-                "frame_0000/frame_0000_left.ply",
+                manifest["view_files"][0]["robot0_agentview_left"],
+                f"frame_0000/{filename}",
             )
 
     def test_save_urdf_projection_masks_by_camera(self):

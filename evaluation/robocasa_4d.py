@@ -490,17 +490,11 @@ def save_pointcloud_sequence(
     if len(camera_names) != view_count:
         raise ValueError(f"camera name count {len(camera_names)} does not match {view_count} views")
 
-    def camera_alias(name: str) -> str:
-        if name.endswith("agentview_left"):
-            return "left"
-        if name.endswith("agentview_right"):
-            return "right"
-        if name.endswith("eye_in_hand"):
-            return "eye_in_hand"
+    def camera_file_id(name: str) -> str:
         return "".join(char if char.isalnum() else "_" for char in name).strip("_")
 
-    camera_aliases = [camera_alias(name) for name in camera_names]
-    if len(set(camera_aliases)) != len(camera_aliases) or any(not name for name in camera_aliases):
+    camera_file_ids = [camera_file_id(name) for name in camera_names]
+    if len(set(camera_file_ids)) != len(camera_file_ids) or any(not name for name in camera_file_ids):
         raise ValueError(f"camera names do not produce unique PLY suffixes: {camera_names}")
 
     def save_per_view_plys(
@@ -508,11 +502,11 @@ def save_pointcloud_sequence(
     ) -> dict[str, str]:
         files = {}
         frame_dir = parent / stem
-        for view, alias in enumerate(camera_aliases):
-            filename = f"{stem}_{alias}.ply"
+        for view, file_id in enumerate(camera_file_ids):
+            filename = f"{stem}_{file_id}.ply"
             selected = view_ids == view
             write_binary_ply(frame_dir / filename, xyz[selected], colors[selected])
-            files[alias] = f"{stem}/{filename}"
+            files[camera_names[view]] = f"{stem}/{filename}"
         return files
 
     if K_t_v33.ndim == 3:
@@ -537,7 +531,7 @@ def save_pointcloud_sequence(
         "environment_files": [],
         "environment_view_files": [],
         "camera_names": camera_names,
-        "camera_aliases": camera_aliases,
+        "camera_file_ids": camera_file_ids,
         "robot_mask_method": "urdf_visual_mesh_depth_projection" if robot_masks_t_vhw is not None else None,
     }
     for time_index in range(frame_count):
@@ -579,7 +573,10 @@ def save_pointcloud_sequence(
                     directory / subset, stem, subset_xyz, subset_rgb, subset_view_id
                 )
                 manifest[f"{subset}_view_files"].append(
-                    {alias: f"{subset}/{filename}" for alias, filename in per_view.items()}
+                    {
+                        camera_name: f"{subset}/{filename}"
+                        for camera_name, filename in per_view.items()
+                    }
                 )
     with (directory / "manifest.json").open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2)
