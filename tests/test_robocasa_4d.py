@@ -125,13 +125,19 @@ class RoboCasa4DTest(unittest.TestCase):
             poses = np.eye(4)[None]
             robot_mask = np.array([[[[True, False]]]])
             save_pointcloud_sequence(
-                root, rgb, depth, K, poses, stride=1, robot_masks_t_vhw=robot_mask
+                root, rgb, depth, K, poses, stride=1,
+                robot_masks_t_vhw=robot_mask,
+                camera_names=["robot0_agentview_left"],
             )
             manifest = json.loads((root / "manifest.json").read_text())
             self.assertTrue((root / manifest["robot_files"][0]).exists())
             self.assertTrue((root / manifest["environment_files"][0]).exists())
             self.assertEqual(len(np.load(root / "robot/frame_0000.npz")["xyz"]), 1)
             self.assertEqual(len(np.load(root / "environment/frame_0000.npz")["xyz"]), 1)
+            self.assertTrue((root / "frame_0000_left.ply").exists())
+            self.assertTrue((root / "robot/frame_0000_left.ply").exists())
+            self.assertTrue((root / "environment/frame_0000_left.ply").exists())
+            self.assertEqual(manifest["view_files"][0]["left"], "frame_0000_left.ply")
 
     def test_save_urdf_projection_masks_by_camera(self):
         with tempfile.TemporaryDirectory() as tmp:

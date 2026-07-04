@@ -478,11 +478,42 @@ def save_pointcloud_sequence(
     timestamps_s: np.ndarray | None = None,
     action_offsets: np.ndarray | None = None,
     robot_masks_t_vhw: np.ndarray | None = None,
+    camera_names: list[str] | None = None,
 ) -> None:
-    """Save one fused PLY and compressed NPZ per time step."""
+    """Save fused and per-camera PLY files plus one compressed NPZ per frame."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     frame_count = len(rgb_t_vhwc)
+    view_count = np.asarray(rgb_t_vhwc).shape[1]
+    if camera_names is None:
+        camera_names = [f"view_{view}" for view in range(view_count)]
+    if len(camera_names) != view_count:
+        raise ValueError(f"camera name count {len(camera_names)} does not match {view_count} views")
+
+    def camera_alias(name: str) -> str:
+        if name.endswith("agentview_left"):
+            return "left"
+        if name.endswith("agentview_right"):
+            return "right"
+        if name.endswith("eye_in_hand"):
+            return "eye_in_hand"
+        return "".join(char if char.isalnum() else "_" for char in name).strip("_")
+
+    camera_aliases = [camera_alias(name) for name in camera_names]
+    if len(set(camera_aliases)) != len(camera_aliases) or any(not name for name in camera_aliases):
+        raise ValueError(f"camera names do not produce unique PLY suffixes: {camera_names}")
+
+    def save_per_view_plys(
+        parent: Path, stem: str, xyz: np.ndarray, colors: np.ndarray, view_ids: np.ndarray
+    ) -> dict[str, str]:
+        files = {}
+        for view, alias in enumerate(camera_aliases):
+            filename = f"{stem}_{alias}.ply"
+            selected = view_ids == view
+            write_binary_ply(parent / filename, xyz[selected], colors[selected])
+            files[alias] = filename
+        return files
+
     if K_t_v33.ndim == 3:
         K_t_v33 = np.repeat(K_t_v33[None], frame_count, axis=0)
     if poses_t_v44.ndim == 3:
@@ -499,8 +530,13 @@ def save_pointcloud_sequence(
         "timestamps_s": None if timestamps_s is None else np.asarray(timestamps_s).tolist(),
         "action_offsets": None if action_offsets is None else np.asarray(action_offsets).tolist(),
         "files": [],
+        "view_files": [],
         "robot_files": [],
+        "robot_view_files": [],
         "environment_files": [],
+        "environment_view_files": [],
+        "camera_names": camera_names,
+        "camera_aliases": camera_aliases,
         "robot_mask_method": "urdf_visual_mesh_depth_projection" if robot_masks_t_vhw is not None else None,
     }
     for time_index in range(frame_count):
@@ -511,6 +547,9 @@ def save_pointcloud_sequence(
         write_binary_ply(directory / f"{stem}.ply", xyz, rgb)
         np.savez_compressed(directory / f"{stem}.npz", xyz=xyz, rgb=rgb, view_id=view_id)
         manifest["files"].append(f"{stem}.ply")
+        manifest["view_files"].append(
+            save_per_view_plys(directory, stem, xyz, rgb, view_id)
+        )
         if robot_masks_t_vhw is not None:
             image_robot_mask = np.asarray(robot_masks_t_vhw[time_index], dtype=bool)
             for subset, image_mask, key in (
@@ -535,6 +574,12 @@ def save_pointcloud_sequence(
                     view_id=subset_view_id,
                 )
                 manifest[key].append(ply_rel)
+                per_view = save_per_view_plys(
+                    directory / subset, stem, subset_xyz, subset_rgb, subset_view_id
+                )
+                manifest[f"{subset}_view_files"].append(
+                    {alias: f"{subset}/{filename}" for alias, filename in per_view.items()}
+                )
     with (directory / "manifest.json").open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2)
 
@@ -631,6 +676,7 @@ def postprocess_chunk_urdf(
             timestamps_s=archive["timestamps_s"],
             action_offsets=archive["action_offsets"] if "action_offsets" in archive else None,
             robot_masks_t_vhw=masks,
+            camera_names=metadata["camera_names"],
         )
         save_urdf_projection_masks(
             chunk / source / "urdf_proj_mask", masks, metadata["camera_names"]
