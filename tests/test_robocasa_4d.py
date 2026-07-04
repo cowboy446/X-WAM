@@ -7,6 +7,7 @@ import numpy as np
 
 from evaluation.robocasa_4d import (
     backproject_rgbd,
+    depth_buffer_repair_is_safe,
     fit_predicted_depth_to_metric,
     robocasa_depth_calibration_mask,
     save_pointcloud_sequence,
@@ -27,6 +28,16 @@ class RoboCasa4DTest(unittest.TestCase):
         self.assertEqual(
             repaired,
             {"nonfinite": 2, "below_zero": 1, "above_one": 1},
+        )
+        self.assertTrue(
+            depth_buffer_repair_is_safe(
+                {"nonfinite": 0, "below_zero": 1, "above_one": 0}, 256 * 256
+            )
+        )
+        self.assertFalse(
+            depth_buffer_repair_is_safe(
+                {"nonfinite": 100, "below_zero": 0, "above_one": 0}, 256 * 256
+            )
         )
 
     def test_multiview_4d_shape_validation(self):

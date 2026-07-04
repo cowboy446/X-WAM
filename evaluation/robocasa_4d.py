@@ -37,6 +37,11 @@ def sanitize_rendered_depth_buffer(depth_buffer: np.ndarray) -> tuple[np.ndarray
     }
 
 
+def depth_buffer_repair_is_safe(repaired: dict[str, int], pixel_count: int) -> bool:
+    """Allow isolated renderer edge artifacts, but reject a corrupted frame."""
+    return sum(repaired.values()) <= max(32, int(pixel_count * 0.001))
+
+
 def validate_4d_shapes(
     rgb,
     depth,
@@ -131,25 +136,41 @@ def capture_rgbd(env, camera_names: list[str], base2world: np.ndarray, height: i
     world_from_base = np.asarray(base2world, dtype=np.float64)
     base_from_world = np.linalg.inv(world_from_base)
     for camera_name in camera_names:
-        rendered = env.sim.render(
-            height=height,
-            width=width,
-            camera_name=camera_name,
-            depth=True,
-            segmentation=False,
-        )
-        if not isinstance(rendered, tuple) or len(rendered) != 2:
-            raise RuntimeError(f"Expected RGB/depth tuple from camera {camera_name}, got {type(rendered)!r}")
-        rgb, depth_buffer = rendered
-        rgb = np.asarray(rgb)[::-1].copy()
-        depth_buffer, repaired = sanitize_rendered_depth_buffer(
-            np.asarray(depth_buffer)[::-1]
-        )
-        if any(repaired.values()):
+        max_render_attempts = 5
+        for attempt in range(1, max_render_attempts + 1):
+            rendered = env.sim.render(
+                height=height,
+                width=width,
+                camera_name=camera_name,
+                depth=True,
+                segmentation=False,
+            )
+            if not isinstance(rendered, tuple) or len(rendered) != 2:
+                raise RuntimeError(
+                    f"Expected RGB/depth tuple from camera {camera_name}, got {type(rendered)!r}"
+                )
+            rgb, raw_depth_buffer = rendered
+            depth_buffer, repaired = sanitize_rendered_depth_buffer(
+                np.asarray(raw_depth_buffer)[::-1]
+            )
+            if depth_buffer_repair_is_safe(repaired, depth_buffer.size):
+                if any(repaired.values()):
+                    print(
+                        f"[depth-buffer] camera={camera_name} repaired={repaired}",
+                        flush=True,
+                    )
+                break
             print(
-                f"[depth-buffer] camera={camera_name} repaired={repaired}",
+                f"[depth-buffer] camera={camera_name} rejected corrupted render "
+                f"attempt={attempt}/{max_render_attempts} invalid={repaired}",
                 flush=True,
             )
+        else:
+            raise RuntimeError(
+                f"Camera {camera_name} returned a corrupted depth buffer on "
+                f"{max_render_attempts} consecutive renders; last invalid counts: {repaired}"
+            )
+        rgb = np.asarray(rgb)[::-1].copy()
         depth_m = np.asarray(get_real_depth_map(env.sim, depth_buffer), dtype=np.float32)
         if depth_m.ndim == 3 and depth_m.shape[-1] == 1:
             depth_m = depth_m[..., 0]
