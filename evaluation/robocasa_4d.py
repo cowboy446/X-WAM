@@ -232,6 +232,7 @@ def fit_predicted_depth_to_metric(
     min_depth: float = 0.05,
     max_depth: float = 10.0,
     view_names: list[str] | None = None,
+    calibration_mask_vhw: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Calibrate generated depth using its frame-0 overlap with measured depth.
 
@@ -247,6 +248,14 @@ def fit_predicted_depth_to_metric(
         raise ValueError(f"predicted_raw must be [T,V,H,W], got {raw.shape}")
     if reference.shape != raw.shape[1:]:
         raise ValueError(f"reference depth shape {reference.shape} does not match {raw.shape[1:]}")
+    if calibration_mask_vhw is not None:
+        calibration_mask = np.asarray(calibration_mask_vhw, dtype=bool)
+        if calibration_mask.shape != reference.shape:
+            raise ValueError(
+                f"calibration mask shape {calibration_mask.shape} does not match {reference.shape}"
+            )
+    else:
+        calibration_mask = None
     if representation == "metric":
         metric = np.clip(raw, min_depth, max_depth)
         return metric, {"representation": "metric", "per_view": []}
@@ -259,6 +268,8 @@ def fit_predicted_depth_to_metric(
         x = raw[0, view].reshape(-1)
         z = reference[view].reshape(-1)
         valid = np.isfinite(x) & np.isfinite(z) & (z > min_depth) & (z < max_depth)
+        if calibration_mask is not None:
+            valid &= calibration_mask[view].reshape(-1)
         if valid.sum() < 100:
             raise ValueError(f"Not enough valid depth pixels to calibrate view {view}: {valid.sum()}")
         xv = x[valid]
@@ -288,6 +299,8 @@ def fit_predicted_depth_to_metric(
         metric[:, view] = np.clip(depth, min_depth, max_depth)
         calibration.append({
             "view": view,
+            "view_name": view_label,
+            "fit_region": "masked" if calibration_mask is not None else "full_frame",
             "scale": float(scale),
             "shift": float(shift),
             "valid_pixels": int(keep.sum()),
@@ -295,6 +308,27 @@ def fit_predicted_depth_to_metric(
             "depth_rmse_m": depth_rmse,
         })
     return metric, {"representation": "inverse_affine", "per_view": calibration}
+
+
+def robocasa_depth_calibration_mask(
+    robot_mask_vhw: np.ndarray, view_names: list[str]
+) -> tuple[np.ndarray, list[str]]:
+    """Select stable frame-0 regions for RoboCasa per-view depth fitting."""
+    robot_mask = np.asarray(robot_mask_vhw, dtype=bool)
+    if robot_mask.ndim != 3 or robot_mask.shape[0] != len(view_names):
+        raise ValueError(
+            f"robot mask/view names mismatch: {robot_mask.shape} vs {len(view_names)}"
+        )
+    selected = np.empty_like(robot_mask)
+    regions = []
+    for view, name in enumerate(view_names):
+        if "eye_in_hand" in name:
+            selected[view] = robot_mask[view]
+            regions.append("robot")
+        else:
+            selected[view] = ~robot_mask[view]
+            regions.append("background")
+    return selected, regions
 
 
 def backproject_rgbd(
@@ -393,6 +427,45 @@ def save_depth_sequence(directory: str | Path, depth_thw: np.ndarray, fps: float
             preview = np.zeros(frame.shape, dtype=np.uint8)
         previews.append(np.repeat(preview[..., None], 3, axis=-1))
     save_rgb_video(directory / "preview.mp4", np.stack(previews), fps)
+
+
+def save_urdf_projection_masks(
+    directory: str | Path,
+    masks_t_vhw: np.ndarray,
+    camera_names: list[str],
+) -> None:
+    """Save lossless URDF projection masks as per-view PNG sequences."""
+    import struct
+    import zlib
+
+    def write_png(path: Path, image: np.ndarray) -> None:
+        height, width = image.shape
+        raw_rows = b"".join(b"\x00" + row.tobytes() for row in image)
+
+        def chunk(name: bytes, payload: bytes) -> bytes:
+            return (
+                struct.pack(">I", len(payload))
+                + name
+                + payload
+                + struct.pack(">I", zlib.crc32(name + payload) & 0xFFFFFFFF)
+            )
+
+        path.write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw_rows))
+            + chunk(b"IEND", b"")
+        )
+
+    directory = Path(directory)
+    masks = np.asarray(masks_t_vhw, dtype=bool)
+    if masks.ndim != 4 or masks.shape[1] != len(camera_names):
+        raise ValueError(f"mask/camera mismatch: {masks.shape} vs {len(camera_names)}")
+    for view, camera_name in enumerate(camera_names):
+        view_dir = directory / camera_name
+        view_dir.mkdir(parents=True, exist_ok=True)
+        for frame, mask in enumerate(masks[:, view]):
+            write_png(view_dir / f"frame_{frame:04d}.png", mask.astype(np.uint8) * 255)
 
 
 def save_pointcloud_sequence(
@@ -558,6 +631,9 @@ def postprocess_chunk_urdf(
             timestamps_s=archive["timestamps_s"],
             action_offsets=archive["action_offsets"] if "action_offsets" in archive else None,
             robot_masks_t_vhw=masks,
+        )
+        save_urdf_projection_masks(
+            chunk / source / "urdf_proj_mask", masks, metadata["camera_names"]
         )
         np.savez_compressed(chunk / source / "robot_masks.npz", mask=masks)
     metadata["robot_split_status"] = "complete"

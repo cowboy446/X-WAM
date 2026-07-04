@@ -121,6 +121,15 @@ matches rendered and observed depth, and reconstructs `full`, `robot`, and
 `environment` point clouds from the resulting pixel masks. Passing an empty
 `--robot_urdf` disables point-cloud reconstruction and splitting.
 
+Before inverse-depth calibration, the frame-0 URDF projection selects a stable
+fit region independently for each view: the fixed left/right cameras use
+background pixels outside the robot mask, while `eye_in_hand` uses robot pixels
+inside the mask. The resulting per-view transform is applied to the whole
+chunk. Lossless projected masks are saved under
+`urdf_proj_mask/<camera>/` for the exact frame-0 calibration projection, plus
+`predicted/urdf_proj_mask/<camera>/` and
+`ground_truth/urdf_proj_mask/<camera>/` for the complete reconstructed sequences.
+
 After each rollout, all chunk point clouds are automatically indexed into one
 continuous timeline at `<rollout>_4d/timeline/manifest.json`. Adjacent duplicate
 boundary frames are removed. Open the timeline locally with:
@@ -252,8 +261,9 @@ All exported point clouds use the robot base frame and metres.
 
 The released RoboCasa depth target is a video without a metric-scale sidecar.
 The capture code therefore always preserves `depth_raw` and, by default, fits an
-inverse-depth affine transform against the measured depth at frame 0 separately
-for every view. This same transform is applied to future predicted frames. The
+inverse-depth affine transform against selected measured-depth pixels at frame 0
+separately for every view. This same transform is applied to future predicted
+frames. The
 result is suitable for inspecting temporal 4D consistency, but it must not be
 described as independently metric depth. Calibration coefficients are recorded
 in `metadata.json`. Use `--pred_depth_representation metric` only for a future

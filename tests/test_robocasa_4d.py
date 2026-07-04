@@ -8,7 +8,9 @@ import numpy as np
 from evaluation.robocasa_4d import (
     backproject_rgbd,
     fit_predicted_depth_to_metric,
+    robocasa_depth_calibration_mask,
     save_pointcloud_sequence,
+    save_urdf_projection_masks,
     stitch_chunk_pointcloud_timelines,
     transform_intrinsics_for_resize_crop,
     validate_4d_shapes,
@@ -60,6 +62,33 @@ class RoboCasa4DTest(unittest.TestCase):
         np.testing.assert_allclose(metric[0, 0], depth[0], rtol=1e-4, atol=1e-4)
         self.assertEqual(metadata["representation"], "inverse_affine")
 
+    def test_robocasa_calibration_regions(self):
+        robot = np.array([
+            [[True, False], [False, False]],
+            [[False, True], [False, False]],
+            [[True, True], [False, False]],
+        ])
+        selected, regions = robocasa_depth_calibration_mask(
+            robot,
+            ["robot0_agentview_left", "robot0_agentview_right", "robot0_eye_in_hand"],
+        )
+        np.testing.assert_array_equal(selected[0], ~robot[0])
+        np.testing.assert_array_equal(selected[1], ~robot[1])
+        np.testing.assert_array_equal(selected[2], robot[2])
+        self.assertEqual(regions, ["background", "background", "robot"])
+
+    def test_masked_inverse_depth_calibration(self):
+        depth = np.linspace(0.5, 2.0, 400, dtype=np.float32).reshape(1, 20, 20)
+        raw0 = (1.0 / depth - 0.25) / 0.01
+        raw = np.stack([raw0, raw0], axis=0)
+        mask = np.zeros_like(depth, dtype=bool)
+        mask[:, :15] = True
+        metric, metadata = fit_predicted_depth_to_metric(
+            raw, depth, calibration_mask_vhw=mask, view_names=["left"]
+        )
+        np.testing.assert_allclose(metric[0, 0], depth[0], rtol=1e-4, atol=1e-4)
+        self.assertEqual(metadata["per_view"][0]["fit_region"], "masked")
+
     def test_intrinsics_resize_crop(self):
         K = np.array([[[100.0, 0.0, 50.0], [0.0, 100.0, 50.0], [0.0, 0.0, 1.0]]])
         transformed = transform_intrinsics_for_resize_crop(K, (100, 100), (200, 200), 1.0)
@@ -103,6 +132,13 @@ class RoboCasa4DTest(unittest.TestCase):
             self.assertTrue((root / manifest["environment_files"][0]).exists())
             self.assertEqual(len(np.load(root / "robot/frame_0000.npz")["xyz"]), 1)
             self.assertEqual(len(np.load(root / "environment/frame_0000.npz")["xyz"]), 1)
+
+    def test_save_urdf_projection_masks_by_camera(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            masks = np.array([[[[True, False]]], [[[False, True]]]])
+            save_urdf_projection_masks(tmp, masks, ["left"])
+            self.assertTrue((Path(tmp) / "left/frame_0000.png").exists())
+            self.assertTrue((Path(tmp) / "left/frame_0001.png").exists())
 
     def test_stitch_chunk_timelines_orders_and_deduplicates_boundaries(self):
         with tempfile.TemporaryDirectory() as tmp:

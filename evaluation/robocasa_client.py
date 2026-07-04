@@ -19,9 +19,13 @@ from evaluation.robocasa_4d import (
     capture_robot_state,
     fit_predicted_depth_to_metric,
     json_dump,
+    load_urdf_visual_triangles,
+    project_urdf_robot_masks,
     resize_center_crop_nearest,
+    robocasa_depth_calibration_mask,
     save_depth_sequence,
     save_rgb_video,
+    save_urdf_projection_masks,
     transform_intrinsics_for_resize_crop,
     validate_4d_shapes,
 )
@@ -185,6 +189,8 @@ def save_4d_chunk(
     model_crop_ratio,
     pred_depth_representation,
     robot_urdf,
+    robot_mask_depth_tolerance,
+    robot_mask_dilation_pixels,
 ):
     """Persist predicted/ground-truth RGB-D and reconstruct both 4D sequences."""
     chunk_root = os.fspath(chunk_root)
@@ -207,12 +213,35 @@ def save_4d_chunk(
     reference_depth = resize_center_crop_nearest(
         initial_capture["depth_m"], (pred_h, pred_w), model_crop_ratio
     )
+    calibration_mask = None
+    calibration_regions = ["full_frame"] * len(camera_names)
+    if robot_urdf and pred_depth_representation == "inverse":
+        frame0_triangles = load_urdf_visual_triangles(
+            robot_urdf, [initial_capture["urdf_qpos"]]
+        )
+        frame0_robot_mask = project_urdf_robot_masks(
+            frame0_triangles,
+            reference_depth[None],
+            transformed_K[None],
+            initial_capture["T_base_from_camera"][None],
+            robot_mask_depth_tolerance,
+            robot_mask_dilation_pixels,
+        )[0]
+        calibration_mask, calibration_regions = robocasa_depth_calibration_mask(
+            frame0_robot_mask, camera_names
+        )
+        save_urdf_projection_masks(
+            root / "urdf_proj_mask", frame0_robot_mask[None], camera_names
+        )
     pred_depth_m, depth_calibration = fit_predicted_depth_to_metric(
         pred_depth_raw,
         reference_depth,
         representation=pred_depth_representation,
         view_names=camera_names,
+        calibration_mask_vhw=calibration_mask,
     )
+    for entry, region in zip(depth_calibration.get("per_view", []), calibration_regions):
+        entry["fit_region"] = region
     pred_poses = predicted_camera_poses(
         result["proprios"], initial_capture["T_base_from_camera"], camera_names
     )
@@ -285,7 +314,8 @@ def save_4d_chunk(
         "prediction": result.get("prediction_metadata", {}),
         "predicted_depth_calibration": depth_calibration,
         "predicted_depth_warning": (
-            "Metric predicted depth is an inverse-affine calibration using frame-0 measured depth. "
+            "Metric predicted depth is an inverse-affine calibration using selected frame-0 "
+            "measured-depth pixels (fixed-view background; eye-in-hand robot). "
             "Use depth_raw for auditing; this calibration is not ground-truth future depth."
         ),
         "predicted_frame_count": pred_frames,
@@ -554,6 +584,8 @@ def main(args: Args):
                     args.model_crop_ratio,
                     args.pred_depth_representation,
                     args.robot_urdf,
+                    args.robot_mask_depth_tolerance,
+                    args.robot_mask_dilation_pixels,
                 )
                 print(f"Saved 4D capture to {rollout_root}")
                 if args.robot_urdf:
