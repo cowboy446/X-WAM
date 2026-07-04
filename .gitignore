@@ -5,6 +5,7 @@ CLAUDE.md
 
 datasets/
 *.sh
+!scripts/package_4d_task.sh
 experiments/
 eval_results/
 checkpoints/

@@ -144,6 +144,19 @@ The window has a time slider and selectors for `imagined` / `simulation` and
 `full` / `robot` / `environment` point clouds. The manifest references the
 existing chunk PLY files, so stitching does not copy the point-cloud data.
 
+To package every rollout timeline for one task while preserving the complete
+directory structure, run:
+
+```bash
+scripts/package_4d_task.sh \
+    eval_results/robocasa/<task> \
+    /path/to/<task>_4d_visualization.tar.gz
+```
+
+The archive contains every JSON below the task directory and only the PLY files
+referenced by its continuous timeline manifests. Omitting the output argument
+writes `<task>_4d_visualization.tar.gz` beside the task directory.
+
 To evaluate all 24 tasks in parallel:
 
 ```bash
