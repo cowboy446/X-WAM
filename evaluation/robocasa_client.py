@@ -4,6 +4,7 @@ import time
 import json
 import pickle
 import subprocess
+import tempfile
 import zmq
 import tyro
 import imageio
@@ -19,8 +20,6 @@ from evaluation.robocasa_4d import (
     capture_robot_state,
     fit_predicted_depth_to_metric,
     json_dump,
-    load_urdf_visual_triangles,
-    project_urdf_robot_masks,
     resize_center_crop_nearest,
     robocasa_depth_calibration_mask,
     save_depth_sequence,
@@ -173,6 +172,49 @@ def capture_4d_frame(env, camera_names, base2world):
     return capture
 
 
+def project_frame0_urdf_mask_isolated(
+    robot_urdf,
+    urdf_qpos,
+    reference_depth,
+    K,
+    poses,
+    depth_tolerance,
+    dilation_pixels,
+):
+    """Run Open3D raycasting outside the live MuJoCo renderer process."""
+    worker = os.path.join(os.path.dirname(__file__), "project_urdf_mask.py")
+    with tempfile.TemporaryDirectory(prefix="xwam_urdf_mask_") as tmp:
+        input_path = os.path.join(tmp, "input.npz")
+        qpos_path = os.path.join(tmp, "qpos.json")
+        output_path = os.path.join(tmp, "mask.npz")
+        np.savez_compressed(
+            input_path,
+            depth=np.asarray(reference_depth)[None],
+            K=np.asarray(K)[None],
+            poses=np.asarray(poses)[None],
+        )
+        with open(qpos_path, "w", encoding="utf-8") as handle:
+            json.dump(urdf_qpos, handle)
+        subprocess.run(
+            [
+                sys.executable,
+                worker,
+                input_path,
+                qpos_path,
+                output_path,
+                "--robot-urdf",
+                os.path.abspath(os.path.expanduser(robot_urdf)),
+                "--depth-tolerance",
+                str(depth_tolerance),
+                "--dilation-pixels",
+                str(dilation_pixels),
+            ],
+            check=True,
+        )
+        with np.load(output_path) as archive:
+            return archive["mask"][0].copy()
+
+
 def save_4d_chunk(
     chunk_root,
     result,
@@ -216,17 +258,15 @@ def save_4d_chunk(
     calibration_mask = None
     calibration_regions = ["full_frame"] * len(camera_names)
     if robot_urdf and pred_depth_representation == "inverse":
-        frame0_triangles = load_urdf_visual_triangles(
-            robot_urdf, [initial_capture["urdf_qpos"]]
-        )
-        frame0_robot_mask = project_urdf_robot_masks(
-            frame0_triangles,
-            reference_depth[None],
-            transformed_K[None],
-            initial_capture["T_base_from_camera"][None],
+        frame0_robot_mask = project_frame0_urdf_mask_isolated(
+            robot_urdf,
+            initial_capture["urdf_qpos"],
+            reference_depth,
+            transformed_K,
+            initial_capture["T_base_from_camera"],
             robot_mask_depth_tolerance,
             robot_mask_dilation_pixels,
-        )[0]
+        )
         calibration_mask, calibration_regions = robocasa_depth_calibration_mask(
             frame0_robot_mask, camera_names
         )

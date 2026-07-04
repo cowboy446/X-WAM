@@ -124,8 +124,9 @@ matches rendered and observed depth, and reconstructs `full`, `robot`, and
 Before inverse-depth calibration, the frame-0 URDF projection selects a stable
 fit region independently for each view: the fixed left/right cameras use
 background pixels outside the robot mask, while `eye_in_hand` uses robot pixels
-inside the mask. The resulting per-view transform is applied to the whole
-chunk. Lossless projected masks are saved under
+inside the mask. This Open3D projection runs in an isolated worker so it cannot
+disturb the live MuJoCo OpenGL context. The resulting per-view transform is
+applied to the whole chunk. Lossless projected masks are saved under
 `urdf_proj_mask/<camera>/` for the exact frame-0 calibration projection, plus
 `predicted/urdf_proj_mask/<camera>/` and
 `ground_truth/urdf_proj_mask/<camera>/` for the complete reconstructed sequences.
