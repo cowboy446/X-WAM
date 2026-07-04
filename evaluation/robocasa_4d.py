@@ -507,11 +507,12 @@ def save_pointcloud_sequence(
         parent: Path, stem: str, xyz: np.ndarray, colors: np.ndarray, view_ids: np.ndarray
     ) -> dict[str, str]:
         files = {}
+        frame_dir = parent / stem
         for view, alias in enumerate(camera_aliases):
             filename = f"{stem}_{alias}.ply"
             selected = view_ids == view
-            write_binary_ply(parent / filename, xyz[selected], colors[selected])
-            files[alias] = filename
+            write_binary_ply(frame_dir / filename, xyz[selected], colors[selected])
+            files[alias] = f"{stem}/{filename}"
         return files
 
     if K_t_v33.ndim == 3:
