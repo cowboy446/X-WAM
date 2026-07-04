@@ -22,6 +22,21 @@ from typing import Any
 import numpy as np
 
 
+def sanitize_rendered_depth_buffer(depth_buffer: np.ndarray) -> tuple[np.ndarray, dict[str, int]]:
+    """Make an OpenGL depth buffer safe for RoboSuite's strict [0, 1] check."""
+    depth = np.asarray(depth_buffer, dtype=np.float32).copy()
+    nonfinite = ~np.isfinite(depth)
+    below = np.isfinite(depth) & (depth < 0.0)
+    above = np.isfinite(depth) & (depth > 1.0)
+    depth[nonfinite] = 1.0
+    np.clip(depth, 0.0, 1.0, out=depth)
+    return depth, {
+        "nonfinite": int(nonfinite.sum()),
+        "below_zero": int(below.sum()),
+        "above_one": int(above.sum()),
+    }
+
+
 def validate_4d_shapes(
     rgb,
     depth,
@@ -127,7 +142,14 @@ def capture_rgbd(env, camera_names: list[str], base2world: np.ndarray, height: i
             raise RuntimeError(f"Expected RGB/depth tuple from camera {camera_name}, got {type(rendered)!r}")
         rgb, depth_buffer = rendered
         rgb = np.asarray(rgb)[::-1].copy()
-        depth_buffer = np.asarray(depth_buffer)[::-1].copy()
+        depth_buffer, repaired = sanitize_rendered_depth_buffer(
+            np.asarray(depth_buffer)[::-1]
+        )
+        if any(repaired.values()):
+            print(
+                f"[depth-buffer] camera={camera_name} repaired={repaired}",
+                flush=True,
+            )
         depth_m = np.asarray(get_real_depth_map(env.sim, depth_buffer), dtype=np.float32)
         if depth_m.ndim == 3 and depth_m.shape[-1] == 1:
             depth_m = depth_m[..., 0]

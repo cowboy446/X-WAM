@@ -11,6 +11,7 @@ from evaluation.robocasa_4d import (
     robocasa_depth_calibration_mask,
     save_pointcloud_sequence,
     save_urdf_projection_masks,
+    sanitize_rendered_depth_buffer,
     stitch_chunk_pointcloud_timelines,
     transform_intrinsics_for_resize_crop,
     validate_4d_shapes,
@@ -19,6 +20,15 @@ from evaluation.robocasa_4d import (
 
 
 class RoboCasa4DTest(unittest.TestCase):
+    def test_sanitize_rendered_depth_buffer(self):
+        source = np.array([[-1e-6, 0.5, 1.000001, np.nan, np.inf]], dtype=np.float32)
+        sanitized, repaired = sanitize_rendered_depth_buffer(source)
+        np.testing.assert_allclose(sanitized, [[0.0, 0.5, 1.0, 1.0, 1.0]])
+        self.assertEqual(
+            repaired,
+            {"nonfinite": 2, "below_zero": 1, "above_one": 1},
+        )
+
     def test_multiview_4d_shape_validation(self):
         T, V, H, W = 33, 3, 8, 10
         rgb = np.zeros((T, V, H, W, 3), dtype=np.uint8)
