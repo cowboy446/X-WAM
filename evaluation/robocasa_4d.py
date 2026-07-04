@@ -201,14 +201,18 @@ def capture_robot_state(env) -> dict[str, Any]:
     indexes = np.asarray(getattr(robot, "_ref_joint_pos_indexes", []), dtype=np.int64)
     robot_qpos = np.asarray(data.qpos[indexes], dtype=np.float64).copy() if indexes.size else np.empty(0)
     joint_names = list(getattr(robot.robot_model, "joints", []))
-    # Match PointWorld's Franka URDF contract. RoboSuite exposes the seven arm
-    # joints in robot_qpos; the Robotiq controller exposes its driving joint.
+    # Match RoboSuite's bundled Panda arm-hand URDF. RoboSuite exposes the
+    # seven arm joints followed by the attached Panda gripper joints.
     urdf_qpos = {f"panda_joint{i + 1}": float(value) for i, value in enumerate(robot_qpos[:7])}
     controller = robot.composite_controller
     grippers = list(controller.grippers.keys())
     if grippers:
         gripper_controller = controller.part_controllers[grippers[0]]
-        urdf_qpos["finger_joint"] = float(np.asarray(gripper_controller.joint_pos).reshape(-1)[0])
+        gripper_qpos = np.asarray(gripper_controller.joint_pos).reshape(-1)
+        if gripper_qpos.size:
+            urdf_qpos["panda_finger_joint1"] = float(
+                np.clip(abs(gripper_qpos[0]), 0.0, 0.04)
+            )
     return {
         "sim_qpos": np.asarray(data.qpos, dtype=np.float64).copy(),
         "robot_qpos": robot_qpos,
@@ -237,7 +241,12 @@ def load_urdf_visual_triangles(
     path = Path(urdf_path).expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(f"Robot URDF not found: {path}")
-    robot = urdfpy.URDF.load(str(path))
+    load_path, temporary_path = _resolve_urdf_package_uris(path)
+    try:
+        robot = urdfpy.URDF.load(str(load_path))
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
     actuated = {joint.name for joint in robot.actuated_joints}
     sequence: list[tuple[np.ndarray, np.ndarray]] = []
     for saved_cfg in urdf_qpos_t:
@@ -266,6 +275,45 @@ def load_urdf_visual_triangles(
             raise ValueError(f"URDF has no visual triangle meshes: {path}")
         sequence.append((np.concatenate(vertices), np.concatenate(triangles)))
     return sequence
+
+
+def _resolve_urdf_package_uris(path: Path) -> tuple[Path, Path | None]:
+    """Materialize ROS package:// asset paths for standalone urdfpy loading."""
+    import tempfile
+    import xml.etree.ElementTree as ET
+
+    tree = ET.parse(path)
+    package_elements = []
+    for element in tree.iter():
+        filename = element.attrib.get("filename", "")
+        if filename.startswith("package://"):
+            package_elements.append((element, filename))
+    if not package_elements:
+        return path, None
+
+    for element, filename in package_elements:
+        package_ref = filename[len("package://") :]
+        package_name, separator, relative = package_ref.partition("/")
+        if not separator:
+            raise ValueError(f"Malformed URDF package URI: {filename}")
+        package_root = next(
+            (parent for parent in (path.parent, *path.parents) if parent.name == package_name),
+            None,
+        )
+        if package_root is None:
+            raise FileNotFoundError(
+                f"Cannot resolve URDF package {package_name!r} from {path}"
+            )
+        resolved = (package_root / relative).resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"URDF asset does not exist: {resolved}")
+        element.attrib["filename"] = str(resolved)
+
+    handle = tempfile.NamedTemporaryFile(suffix=".urdf", delete=False)
+    temporary_path = Path(handle.name)
+    handle.close()
+    tree.write(temporary_path, encoding="utf-8", xml_declaration=True)
+    return temporary_path, temporary_path
 
 
 def fit_predicted_depth_to_metric(

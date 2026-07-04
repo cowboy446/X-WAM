@@ -101,7 +101,7 @@ python evaluation/robocasa_client.py \
 ```
 
 To export calibrated 4D point clouds and split robot/environment points with
-the same Franka URDF used by PointWorld:
+the Panda arm-hand URDF matching RoboSuite's `PandaOmron` composition:
 
 ```bash
 pip install urdfpy==0.0.22 --no-deps
@@ -110,7 +110,7 @@ pip install -r environments/requirements_urdfpy_runtime.txt
 python evaluation/robocasa_client.py \
     --capture_4d \
     --capture_stride 1 \
-    --robot_urdf ../PointWorld/assets/franka_description/franka_panda_robotiq_2f85.urdf \
+    --robot_urdf third_party/robosuite/robosuite/models/assets/bullet_data/panda_description/urdf/panda_arm_hand.urdf \
     --robot_mask_depth_tolerance 0.03 \
     --robot_mask_dilation_pixels 2
 ```

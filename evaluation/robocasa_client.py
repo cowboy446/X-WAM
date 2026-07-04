@@ -482,8 +482,11 @@ class Args:
     """Depth tolerance in metres when matching RGB-D pixels to projected URDF mesh."""
     robot_mask_dilation_pixels: int = 2
     """Image-space dilation applied to the projected robot mask."""
-    robot_urdf: str = "../PointWorld/assets/franka_description/franka_panda_robotiq_2f85.urdf"
-    """Franka URDF visual meshes projected into RGB-D views; empty disables reconstruction."""
+    robot_urdf: str = (
+        "third_party/robosuite/robosuite/models/assets/bullet_data/"
+        "panda_description/urdf/panda_arm_hand.urdf"
+    )
+    """RoboSuite Panda arm-hand URDF projected into RGB-D views; empty disables reconstruction."""
 
 
 def main(args: Args):

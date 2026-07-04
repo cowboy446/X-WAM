@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from evaluation.robocasa_4d import (
+    _resolve_urdf_package_uris,
     backproject_rgbd,
     depth_buffer_repair_is_safe,
     fit_predicted_depth_to_metric,
@@ -21,6 +22,27 @@ from evaluation.robocasa_4d import (
 
 
 class RoboCasa4DTest(unittest.TestCase):
+    def test_resolve_urdf_package_uri(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "panda_description"
+            urdf_dir = package / "urdf"
+            mesh = package / "meshes/visual/hand.dae"
+            urdf_dir.mkdir(parents=True)
+            mesh.parent.mkdir(parents=True)
+            mesh.touch()
+            urdf = urdf_dir / "robot.urdf"
+            urdf.write_text(
+                '<robot name="p"><link name="hand"><visual><geometry>'
+                '<mesh filename="package://panda_description/meshes/visual/hand.dae"/>'
+                "</geometry></visual></link></robot>"
+            )
+            resolved, temporary = _resolve_urdf_package_uris(urdf)
+            try:
+                self.assertNotEqual(resolved, urdf)
+                self.assertIn(str(mesh.resolve()), resolved.read_text())
+            finally:
+                temporary.unlink(missing_ok=True)
+
     def test_sanitize_rendered_depth_buffer(self):
         source = np.array([[-1e-6, 0.5, 1.000001, np.nan, np.inf]], dtype=np.float32)
         sanitized, repaired = sanitize_rendered_depth_buffer(source)
