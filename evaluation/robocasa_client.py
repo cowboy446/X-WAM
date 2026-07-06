@@ -355,8 +355,8 @@ def save_4d_chunk(
         "prediction": result.get("prediction_metadata", {}),
         "predicted_depth_calibration": depth_calibration,
         "predicted_depth_warning": (
-            "Metric predicted depth is an inverse-affine calibration using frame-0 "
-            "measured-depth background pixels outside the URDF mask for every camera. "
+            "Metric predicted depth is an inverse-affine calibration using selected frame-0 "
+            "measured-depth pixels (fixed-view background; eye-in-hand robot). "
             "Use depth_raw for auditing; this calibration is not ground-truth future depth."
         ),
         "predicted_raw_depth_threshold": depth_threshold,
@@ -484,7 +484,7 @@ class Args:
     """Depth tolerance in metres when matching RGB-D pixels to projected URDF mesh."""
     robot_mask_dilation_pixels: int = 2
     """Image-space dilation applied to the projected robot mask."""
-    depth_threshold: float = 30.0
+    depth_threshold: float = 0.0
     """Minimum generated uint8 depth value included in predicted point-cloud reconstruction."""
     robot_urdf: str = (
         "third_party/robosuite/robosuite/models/assets/bullet_data/"

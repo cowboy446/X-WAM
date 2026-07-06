@@ -117,8 +117,8 @@ class RoboCasa4DTest(unittest.TestCase):
         )
         np.testing.assert_array_equal(selected[0], ~robot[0])
         np.testing.assert_array_equal(selected[1], ~robot[1])
-        np.testing.assert_array_equal(selected[2], ~robot[2])
-        self.assertEqual(regions, ["background", "background", "background"])
+        np.testing.assert_array_equal(selected[2], robot[2])
+        self.assertEqual(regions, ["background", "background", "robot"])
 
     def test_masked_inverse_depth_calibration(self):
         depth = np.linspace(0.5, 2.0, 400, dtype=np.float32).reshape(1, 20, 20)

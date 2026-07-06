@@ -427,13 +427,22 @@ def fit_predicted_depth_to_metric(
 def robocasa_depth_calibration_mask(
     robot_mask_vhw: np.ndarray, view_names: list[str]
 ) -> tuple[np.ndarray, list[str]]:
-    """Select URDF-mask background pixels for every RoboCasa camera."""
+    """Select background for fixed cameras and robot pixels for eye-in-hand."""
     robot_mask = np.asarray(robot_mask_vhw, dtype=bool)
     if robot_mask.ndim != 3 or robot_mask.shape[0] != len(view_names):
         raise ValueError(
             f"robot mask/view names mismatch: {robot_mask.shape} vs {len(view_names)}"
         )
-    return ~robot_mask, ["background"] * len(view_names)
+    selected = np.empty_like(robot_mask)
+    regions = []
+    for view, name in enumerate(view_names):
+        if "eye_in_hand" in name:
+            selected[view] = robot_mask[view]
+            regions.append("robot")
+        else:
+            selected[view] = ~robot_mask[view]
+            regions.append("background")
+    return selected, regions
 
 
 def backproject_rgbd(
@@ -763,7 +772,7 @@ def postprocess_chunk_urdf(
     robot_urdf: str | Path,
     depth_tolerance: float = 0.03,
     dilation_pixels: int = 2,
-    depth_threshold: float = 30.0,
+    depth_threshold: float = 0.0,
 ) -> None:
     """Project URDF masks and reconstruct one completed chunk."""
     if not 0 <= depth_threshold <= 255:

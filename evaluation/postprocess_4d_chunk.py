@@ -20,7 +20,7 @@ def main() -> None:
     parser.add_argument(
         "--depth-threshold",
         type=float,
-        default=30.0,
+        default=0.0,
         help="Minimum generated uint8 depth value used for predicted reconstruction",
     )
     args = parser.parse_args()
