@@ -233,6 +233,7 @@ def save_4d_chunk(
     robot_urdf,
     robot_mask_depth_tolerance,
     robot_mask_dilation_pixels,
+    depth_threshold,
 ):
     """Persist predicted/ground-truth RGB-D and reconstruct both 4D sequences."""
     chunk_root = os.fspath(chunk_root)
@@ -354,10 +355,11 @@ def save_4d_chunk(
         "prediction": result.get("prediction_metadata", {}),
         "predicted_depth_calibration": depth_calibration,
         "predicted_depth_warning": (
-            "Metric predicted depth is an inverse-affine calibration using selected frame-0 "
-            "measured-depth pixels (fixed-view background; eye-in-hand robot). "
+            "Metric predicted depth is an inverse-affine calibration using frame-0 "
+            "measured-depth background pixels outside the URDF mask for every camera. "
             "Use depth_raw for auditing; this calibration is not ground-truth future depth."
         ),
+        "predicted_raw_depth_threshold": depth_threshold,
         "predicted_frame_count": pred_frames,
         "ground_truth_frame_count": len(gt_captures),
         "chunk_start_step": chunk_start_step,
@@ -482,6 +484,8 @@ class Args:
     """Depth tolerance in metres when matching RGB-D pixels to projected URDF mesh."""
     robot_mask_dilation_pixels: int = 2
     """Image-space dilation applied to the projected robot mask."""
+    depth_threshold: float = 30.0
+    """Minimum generated uint8 depth value included in predicted point-cloud reconstruction."""
     robot_urdf: str = (
         "third_party/robosuite/robosuite/models/assets/bullet_data/"
         "panda_description/urdf/panda_arm_hand.urdf"
@@ -498,6 +502,8 @@ def main(args: Args):
         raise ValueError("point_stride must be >= 1")
     if args.robot_mask_depth_tolerance < 0 or args.robot_mask_dilation_pixels < 0:
         raise ValueError("robot mask tolerance and dilation must be >= 0")
+    if not 0 <= args.depth_threshold <= 255:
+        raise ValueError("depth_threshold must be in [0, 255]")
     if args.capture_4d and args.robot_urdf and not os.path.isfile(os.path.expanduser(args.robot_urdf)):
         raise FileNotFoundError(f"robot_urdf does not exist: {args.robot_urdf}")
     if not 0 < args.model_crop_ratio <= 1:
@@ -629,6 +635,7 @@ def main(args: Args):
                     args.robot_urdf,
                     args.robot_mask_depth_tolerance,
                     args.robot_mask_dilation_pixels,
+                    args.depth_threshold,
                 )
                 print(f"Saved 4D capture to {rollout_root}")
                 if args.robot_urdf:
@@ -645,6 +652,8 @@ def main(args: Args):
                         str(args.robot_mask_depth_tolerance),
                         "--dilation-pixels",
                         str(args.robot_mask_dilation_pixels),
+                        "--depth-threshold",
+                        str(args.depth_threshold),
                     ], check=True)
                     print(f"Saved projected-mask 4D point clouds to {rollout_root}")
 

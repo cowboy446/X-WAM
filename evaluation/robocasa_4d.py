@@ -404,22 +404,13 @@ def fit_predicted_depth_to_metric(
 def robocasa_depth_calibration_mask(
     robot_mask_vhw: np.ndarray, view_names: list[str]
 ) -> tuple[np.ndarray, list[str]]:
-    """Select stable frame-0 regions for RoboCasa per-view depth fitting."""
+    """Select URDF-mask background pixels for every RoboCasa camera."""
     robot_mask = np.asarray(robot_mask_vhw, dtype=bool)
     if robot_mask.ndim != 3 or robot_mask.shape[0] != len(view_names):
         raise ValueError(
             f"robot mask/view names mismatch: {robot_mask.shape} vs {len(view_names)}"
         )
-    selected = np.empty_like(robot_mask)
-    regions = []
-    for view, name in enumerate(view_names):
-        if "eye_in_hand" in name:
-            selected[view] = robot_mask[view]
-            regions.append("robot")
-        else:
-            selected[view] = ~robot_mask[view]
-            regions.append("background")
-    return selected, regions
+    return ~robot_mask, ["background"] * len(view_names)
 
 
 def backproject_rgbd(
@@ -569,6 +560,7 @@ def save_pointcloud_sequence(
     timestamps_s: np.ndarray | None = None,
     action_offsets: np.ndarray | None = None,
     robot_masks_t_vhw: np.ndarray | None = None,
+    valid_depth_masks_t_vhw: np.ndarray | None = None,
     camera_names: list[str] | None = None,
 ) -> None:
     """Save fused and per-camera PLY files plus one compressed NPZ per frame."""
@@ -610,6 +602,13 @@ def save_pointcloud_sequence(
         raise ValueError("action_offsets length must match point-cloud frame count")
     if robot_masks_t_vhw is not None and len(robot_masks_t_vhw) != frame_count:
         raise ValueError("robot_masks_t_vhw length must match point-cloud frame count")
+    if valid_depth_masks_t_vhw is not None:
+        valid_depth_masks_t_vhw = np.asarray(valid_depth_masks_t_vhw, dtype=bool)
+        if valid_depth_masks_t_vhw.shape != np.asarray(depth_t_vhw).shape:
+            raise ValueError(
+                "valid_depth_masks_t_vhw must match depth shape: "
+                f"{valid_depth_masks_t_vhw.shape} vs {np.asarray(depth_t_vhw).shape}"
+            )
     manifest = {
         "frame_count": frame_count,
         "stride": stride,
@@ -626,8 +625,16 @@ def save_pointcloud_sequence(
         "robot_mask_method": "urdf_visual_mesh_depth_projection" if robot_masks_t_vhw is not None else None,
     }
     for time_index in range(frame_count):
+        valid_depth_mask = (
+            None if valid_depth_masks_t_vhw is None else valid_depth_masks_t_vhw[time_index]
+        )
         xyz, rgb, view_id = backproject_rgbd(
-            rgb_t_vhwc[time_index], depth_t_vhw[time_index], K_t_v33[time_index], poses_t_v44[time_index], stride
+            rgb_t_vhwc[time_index],
+            depth_t_vhw[time_index],
+            K_t_v33[time_index],
+            poses_t_v44[time_index],
+            stride,
+            pixel_mask_vhw=valid_depth_mask,
         )
         stem = f"frame_{time_index:04d}"
         write_binary_ply(directory / f"{stem}.ply", xyz, rgb)
@@ -642,6 +649,8 @@ def save_pointcloud_sequence(
                 ("robot", image_robot_mask, "robot_files"),
                 ("environment", ~image_robot_mask, "environment_files"),
             ):
+                if valid_depth_mask is not None:
+                    image_mask = image_mask & valid_depth_mask
                 subset_xyz, subset_rgb, subset_view_id = backproject_rgbd(
                     rgb_t_vhwc[time_index],
                     depth_t_vhw[time_index],
@@ -731,8 +740,11 @@ def postprocess_chunk_urdf(
     robot_urdf: str | Path,
     depth_tolerance: float = 0.03,
     dilation_pixels: int = 2,
+    depth_threshold: float = 30.0,
 ) -> None:
     """Project URDF masks and reconstruct one completed chunk."""
+    if not 0 <= depth_threshold <= 255:
+        raise ValueError("depth_threshold must be in [0, 255]")
     chunk = Path(chunk_root).resolve()
     metadata_path = chunk / "metadata.json"
     with metadata_path.open("r", encoding="utf-8") as handle:
@@ -755,6 +767,9 @@ def postprocess_chunk_urdf(
         masks = project_urdf_robot_masks(
             triangles, depth, K, poses, depth_tolerance, dilation_pixels
         )
+        valid_depth_masks = None
+        if source == "predicted" and "depth_raw" in archive:
+            valid_depth_masks = archive["depth_raw"] >= depth_threshold
         save_pointcloud_sequence(
             chunk / source / "pointclouds",
             rgb,
@@ -765,6 +780,7 @@ def postprocess_chunk_urdf(
             timestamps_s=archive["timestamps_s"],
             action_offsets=archive["action_offsets"] if "action_offsets" in archive else None,
             robot_masks_t_vhw=masks,
+            valid_depth_masks_t_vhw=valid_depth_masks,
             camera_names=metadata["camera_names"],
         )
         save_urdf_projection_masks(
@@ -774,6 +790,7 @@ def postprocess_chunk_urdf(
     metadata["robot_split_status"] = "complete"
     metadata["robot_mask_depth_tolerance_m"] = depth_tolerance
     metadata["robot_mask_dilation_pixels"] = dilation_pixels
+    metadata["predicted_raw_depth_threshold"] = depth_threshold
     metadata["robot_geometry_source"] = str(Path(robot_urdf).expanduser().resolve())
     json_dump(metadata_path, metadata)
 

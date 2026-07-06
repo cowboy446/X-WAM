@@ -117,8 +117,8 @@ class RoboCasa4DTest(unittest.TestCase):
         )
         np.testing.assert_array_equal(selected[0], ~robot[0])
         np.testing.assert_array_equal(selected[1], ~robot[1])
-        np.testing.assert_array_equal(selected[2], robot[2])
-        self.assertEqual(regions, ["background", "background", "robot"])
+        np.testing.assert_array_equal(selected[2], ~robot[2])
+        self.assertEqual(regions, ["background", "background", "background"])
 
     def test_masked_inverse_depth_calibration(self):
         depth = np.linspace(0.5, 2.0, 400, dtype=np.float32).reshape(1, 20, 20)
@@ -185,6 +185,25 @@ class RoboCasa4DTest(unittest.TestCase):
                 manifest["view_files"][0]["robot0_agentview_left"],
                 f"frame_0000/{filename}",
             )
+
+    def test_sequence_filters_invalid_raw_depth_pixels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rgb = np.zeros((1, 1, 1, 3, 3), dtype=np.uint8)
+            depth = np.ones((1, 1, 1, 3), dtype=np.float32)
+            K = np.eye(3)[None]
+            poses = np.eye(4)[None]
+            valid_depth = np.array([[[[False, True, True]]]])
+            save_pointcloud_sequence(
+                tmp,
+                rgb,
+                depth,
+                K,
+                poses,
+                stride=1,
+                valid_depth_masks_t_vhw=valid_depth,
+            )
+            xyz = np.load(Path(tmp) / "frame_0000.npz")["xyz"]
+            self.assertEqual(len(xyz), 2)
 
     def test_save_urdf_projection_masks_by_camera(self):
         with tempfile.TemporaryDirectory() as tmp:

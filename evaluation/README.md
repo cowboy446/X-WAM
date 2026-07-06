@@ -121,15 +121,17 @@ matches rendered and observed depth, and reconstructs `full`, `robot`, and
 `environment` point clouds from the resulting pixel masks. Passing an empty
 `--robot_urdf` disables point-cloud reconstruction and splitting.
 
-Before inverse-depth calibration, the frame-0 URDF projection selects a stable
-fit region independently for each view: the fixed left/right cameras use
-background pixels outside the robot mask, while `eye_in_hand` uses robot pixels
-inside the mask. This Open3D projection runs in an isolated worker so it cannot
+Before inverse-depth calibration, the frame-0 URDF projection selects background
+pixels outside the robot mask for every view, including `eye_in_hand`. This
+Open3D projection runs in an isolated worker so it cannot
 disturb the live MuJoCo OpenGL context. The resulting per-view transform is
 applied to the whole chunk. Lossless projected masks are saved under
 `urdf_proj_mask/<camera>/` for the exact frame-0 calibration projection, plus
 `predicted/urdf_proj_mask/<camera>/` and
 `ground_truth/urdf_proj_mask/<camera>/` for the complete reconstructed sequences.
+Predicted point-cloud reconstruction additionally keeps only pixels whose raw
+generated uint8 depth is at least `--depth-threshold` (default `30`); this
+threshold does not restrict the background pixels used for depth calibration.
 
 After each rollout, all chunk point clouds are automatically indexed into one
 continuous timeline at `<rollout>_4d/timeline/manifest.json`. Adjacent duplicate

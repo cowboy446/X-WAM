@@ -17,12 +17,19 @@ def main() -> None:
     parser.add_argument("--robot-urdf", type=Path, required=True)
     parser.add_argument("--depth-tolerance", type=float, default=0.03)
     parser.add_argument("--dilation-pixels", type=int, default=2)
+    parser.add_argument(
+        "--depth-threshold",
+        type=float,
+        default=30.0,
+        help="Minimum generated uint8 depth value used for predicted reconstruction",
+    )
     args = parser.parse_args()
     postprocess_chunk_urdf(
         args.chunk_root,
         args.robot_urdf,
         args.depth_tolerance,
         args.dilation_pixels,
+        args.depth_threshold,
     )
 
 
