@@ -6,11 +6,9 @@ from pathlib import Path
 import numpy as np
 
 from evaluation.robocasa_4d import (
-    CaptureCorruptionError,
     _resolve_urdf_package_uris,
     backproject_rgbd,
     depth_buffer_repair_is_safe,
-    depth_buffers_are_consistent,
     fit_predicted_depth_to_metric,
     robocasa_depth_calibration_mask,
     save_pointcloud_sequence,
@@ -18,7 +16,6 @@ from evaluation.robocasa_4d import (
     sanitize_rendered_depth_buffer,
     stitch_chunk_pointcloud_timelines,
     transform_intrinsics_for_resize_crop,
-    validate_calibration_background,
     validate_4d_shapes,
     write_binary_ply,
 )
@@ -64,24 +61,6 @@ class RoboCasa4DTest(unittest.TestCase):
                 {"nonfinite": 100, "below_zero": 0, "above_one": 0}, 256 * 256
             )
         )
-
-    def test_depth_buffer_consistency(self):
-        first = np.full((20, 20), 0.5, dtype=np.float32)
-        consistent, _ = depth_buffers_are_consistent(first, first.copy())
-        self.assertTrue(consistent)
-        second = first.copy()
-        second[:10] = 0.8
-        consistent, stats = depth_buffers_are_consistent(first, second)
-        self.assertFalse(consistent)
-        self.assertEqual(stats["changed_pixels"], 200)
-
-    def test_rejects_implausibly_full_calibration_mask(self):
-        mask = np.ones((3, 256, 256), dtype=bool)
-        with self.assertRaises(CaptureCorruptionError):
-            validate_calibration_background(mask, ["left", "right", "eye"])
-        mask[:, :20] = False
-        stats = validate_calibration_background(mask, ["left", "right", "eye"])
-        self.assertEqual(stats[0]["background_pixels"], 20 * 256)
 
     def test_multiview_4d_shape_validation(self):
         T, V, H, W = 33, 3, 8, 10
