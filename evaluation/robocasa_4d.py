@@ -42,6 +42,24 @@ def depth_buffer_repair_is_safe(repaired: dict[str, int], pixel_count: int) -> b
     return sum(repaired.values()) <= max(32, int(pixel_count * 0.001))
 
 
+def reset_robosuite_offscreen_renderer(env) -> None:
+    """Recreate only RoboSuite's offscreen GL context, preserving simulation state."""
+    import gc
+    from robosuite.utils.binding_utils import MjRenderContextOffscreen
+
+    sim = env.sim
+    old_context = sim._render_context_offscreen
+    device_id = getattr(old_context, "device_id", getattr(env, "render_gpu_device_id", -1))
+    # Break sim -> context ownership first; deleting the old context then frees
+    # its MjrContext and GLContext without touching sim.model or sim.data.
+    sim._render_context_offscreen = None
+    del old_context
+    gc.collect()
+    context = MjRenderContextOffscreen(sim, device_id=device_id)
+    context.vopt.geomgroup[0] = 1 if getattr(env, "render_collision_mesh", False) else 0
+    context.vopt.geomgroup[1] = 1 if getattr(env, "render_visual_mesh", True) else 0
+
+
 def validate_4d_shapes(
     rgb,
     depth,
@@ -163,6 +181,11 @@ def capture_rgbd(env, camera_names: list[str], base2world: np.ndarray, height: i
             print(
                 f"[depth-buffer] camera={camera_name} rejected corrupted render "
                 f"attempt={attempt}/{max_render_attempts} invalid={repaired}",
+                flush=True,
+            )
+            reset_robosuite_offscreen_renderer(env)
+            print(
+                f"[depth-buffer] camera={camera_name} rebuilt offscreen renderer",
                 flush=True,
             )
         else:
