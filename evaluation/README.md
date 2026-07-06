@@ -132,6 +132,10 @@ applied to the whole chunk. Lossless projected masks are saved under
 Predicted point-cloud reconstruction additionally keeps only pixels whose raw
 generated uint8 depth is at least `--depth-threshold` (default `30`); this
 threshold does not restrict the background pixels used for depth calibration.
+Each RGB-D capture now requires two consistent depth-buffer renders without a
+simulation step between them. Calibration also rejects URDF masks with less
+than 5% (or 1000 pixels) of background in any camera, preventing a corrupted
+OpenGL depth buffer from silently producing an all-robot mask.
 
 After each rollout, all chunk point clouds are automatically indexed into one
 continuous timeline at `<rollout>_4d/timeline/manifest.json`. Adjacent duplicate

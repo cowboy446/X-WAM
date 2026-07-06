@@ -22,6 +22,10 @@ from typing import Any
 import numpy as np
 
 
+class CaptureCorruptionError(RuntimeError):
+    """Raised when an RGB-D capture is numerically valid but semantically corrupted."""
+
+
 def sanitize_rendered_depth_buffer(depth_buffer: np.ndarray) -> tuple[np.ndarray, dict[str, int]]:
     """Make an OpenGL depth buffer safe for RoboSuite's strict [0, 1] check."""
     depth = np.asarray(depth_buffer, dtype=np.float32).copy()
@@ -40,6 +44,58 @@ def sanitize_rendered_depth_buffer(depth_buffer: np.ndarray) -> tuple[np.ndarray
 def depth_buffer_repair_is_safe(repaired: dict[str, int], pixel_count: int) -> bool:
     """Allow isolated renderer edge artifacts, but reject a corrupted frame."""
     return sum(repaired.values()) <= max(32, int(pixel_count * 0.001))
+
+
+def depth_buffers_are_consistent(
+    first: np.ndarray,
+    second: np.ndarray,
+    tolerance: float = 1e-4,
+    max_changed_fraction: float = 0.001,
+) -> tuple[bool, dict[str, float]]:
+    """Check two renders made without advancing the simulator state."""
+    first, second = np.asarray(first), np.asarray(second)
+    if first.shape != second.shape:
+        return False, {"changed_pixels": float("inf"), "max_abs_diff": float("inf")}
+    difference = np.abs(first.astype(np.float64) - second.astype(np.float64))
+    changed = difference > tolerance
+    allowed = max(32, int(first.size * max_changed_fraction))
+    stats = {
+        "changed_pixels": int(changed.sum()),
+        "allowed_changed_pixels": allowed,
+        "max_abs_diff": float(difference.max(initial=0.0)),
+    }
+    return int(changed.sum()) <= allowed, stats
+
+
+def validate_calibration_background(
+    robot_mask_vhw: np.ndarray,
+    view_names: list[str],
+    min_background_fraction: float = 0.05,
+    min_background_pixels: int = 1000,
+) -> list[dict[str, float]]:
+    """Reject implausibly full URDF masks before inverse-depth fitting."""
+    mask = np.asarray(robot_mask_vhw, dtype=bool)
+    if mask.ndim != 3 or mask.shape[0] != len(view_names):
+        raise ValueError(f"robot mask/view names mismatch: {mask.shape} vs {len(view_names)}")
+    minimum = max(min_background_pixels, int(mask.shape[-2] * mask.shape[-1] * min_background_fraction))
+    stats = []
+    bad = []
+    for view, name in enumerate(view_names):
+        background = int((~mask[view]).sum())
+        entry = {
+            "view": name,
+            "robot_fraction": float(mask[view].mean()),
+            "background_pixels": background,
+        }
+        stats.append(entry)
+        if background < minimum:
+            bad.append(entry)
+    if bad:
+        raise CaptureCorruptionError(
+            "Implausible URDF calibration mask; expected at least "
+            f"{minimum} background pixels per view, got {bad}"
+        )
+    return stats
 
 
 def validate_4d_shapes(
@@ -136,7 +192,8 @@ def capture_rgbd(env, camera_names: list[str], base2world: np.ndarray, height: i
     world_from_base = np.asarray(base2world, dtype=np.float64)
     base_from_world = np.linalg.inv(world_from_base)
     for camera_name in camera_names:
-        max_render_attempts = 5
+        max_render_attempts = 6
+        previous_depth_buffer = None
         for attempt in range(1, max_render_attempts + 1):
             rendered = env.sim.render(
                 height=height,
@@ -153,22 +210,38 @@ def capture_rgbd(env, camera_names: list[str], base2world: np.ndarray, height: i
             depth_buffer, repaired = sanitize_rendered_depth_buffer(
                 np.asarray(raw_depth_buffer)[::-1]
             )
-            if depth_buffer_repair_is_safe(repaired, depth_buffer.size):
-                if any(repaired.values()):
-                    print(
-                        f"[depth-buffer] camera={camera_name} repaired={repaired}",
-                        flush=True,
-                    )
-                break
-            print(
-                f"[depth-buffer] camera={camera_name} rejected corrupted render "
-                f"attempt={attempt}/{max_render_attempts} invalid={repaired}",
-                flush=True,
+            if not depth_buffer_repair_is_safe(repaired, depth_buffer.size):
+                previous_depth_buffer = None
+                print(
+                    f"[depth-buffer] camera={camera_name} rejected corrupted render "
+                    f"attempt={attempt}/{max_render_attempts} invalid={repaired}",
+                    flush=True,
+                )
+                continue
+            if previous_depth_buffer is None:
+                previous_depth_buffer = depth_buffer
+                continue
+            consistent, consistency = depth_buffers_are_consistent(
+                previous_depth_buffer, depth_buffer
             )
+            if not consistent:
+                print(
+                    f"[depth-buffer] camera={camera_name} rejected inconsistent render "
+                    f"attempt={attempt}/{max_render_attempts} consistency={consistency}",
+                    flush=True,
+                )
+                previous_depth_buffer = depth_buffer
+                continue
+            if any(repaired.values()):
+                print(
+                    f"[depth-buffer] camera={camera_name} repaired={repaired}",
+                    flush=True,
+                )
+            break
         else:
-            raise RuntimeError(
-                f"Camera {camera_name} returned a corrupted depth buffer on "
-                f"{max_render_attempts} consecutive renders; last invalid counts: {repaired}"
+            raise CaptureCorruptionError(
+                f"Camera {camera_name} did not return two consistent depth buffers in "
+                f"{max_render_attempts} renders; last invalid counts: {repaired}"
             )
         rgb = np.asarray(rgb)[::-1].copy()
         depth_m = np.asarray(get_real_depth_map(env.sim, depth_buffer), dtype=np.float32)

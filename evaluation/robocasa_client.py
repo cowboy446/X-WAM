@@ -16,6 +16,7 @@ from scipy.spatial.transform import Rotation as R
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from evaluation.robocasa_4d import (
+    CaptureCorruptionError,
     capture_rgbd,
     capture_robot_state,
     fit_predicted_depth_to_metric,
@@ -26,6 +27,7 @@ from evaluation.robocasa_4d import (
     save_rgb_video,
     save_urdf_projection_masks,
     transform_intrinsics_for_resize_crop,
+    validate_calibration_background,
     validate_4d_shapes,
 )
 
@@ -268,6 +270,8 @@ def save_4d_chunk(
             robot_mask_depth_tolerance,
             robot_mask_dilation_pixels,
         )
+        mask_stats = validate_calibration_background(frame0_robot_mask, camera_names)
+        print(f"[depth-calibration] URDF mask stats: {mask_stats}", flush=True)
         calibration_mask, calibration_regions = robocasa_depth_calibration_mask(
             frame0_robot_mask, camera_names
         )
