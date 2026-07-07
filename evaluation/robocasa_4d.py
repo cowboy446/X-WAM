@@ -721,6 +721,37 @@ def json_dump(path: str | Path, payload: dict[str, Any]) -> None:
         json.dump(payload, handle, indent=2)
 
 
+def parse_view_depth_thresholds(
+    depth_threshold: str | float | list[float] | tuple[float, ...],
+    view_names: list[str],
+) -> list[float]:
+    """Parse one raw-depth threshold per camera view.
+
+    CLI callers pass comma-separated values such as ``30,30,50``. Values are
+    consumed in ``view_names`` order, and every view must have exactly one
+    threshold so accidental scalar reuse cannot silently change reconstruction.
+    """
+    if isinstance(depth_threshold, str):
+        parts = [part.strip() for part in depth_threshold.split(",")]
+        if any(part == "" for part in parts):
+            raise ValueError(
+                f"depth_threshold must be comma-separated numbers, got {depth_threshold!r}"
+            )
+        thresholds = [float(part) for part in parts]
+    elif np.isscalar(depth_threshold):
+        thresholds = [float(depth_threshold)]
+    else:
+        thresholds = [float(value) for value in depth_threshold]
+    if len(thresholds) != len(view_names):
+        raise ValueError(
+            "depth_threshold must provide exactly one value per view in camera order: "
+            f"got {len(thresholds)} values for {len(view_names)} views {view_names}"
+        )
+    if any(not 0 <= value <= 255 for value in thresholds):
+        raise ValueError("depth_threshold values must be in [0, 255]")
+    return thresholds
+
+
 def project_urdf_robot_masks(
     triangle_soups_t: list[tuple[np.ndarray, np.ndarray]],
     depth_t_vhw: np.ndarray,
@@ -772,15 +803,15 @@ def postprocess_chunk_urdf(
     robot_urdf: str | Path,
     depth_tolerance: float = 0.03,
     dilation_pixels: int = 2,
-    depth_threshold: float = 0.0,
+    depth_threshold: str | float | list[float] | tuple[float, ...] = "0,0,0",
 ) -> None:
     """Project URDF masks and reconstruct one completed chunk."""
-    if not 0 <= depth_threshold <= 255:
-        raise ValueError("depth_threshold must be in [0, 255]")
     chunk = Path(chunk_root).resolve()
     metadata_path = chunk / "metadata.json"
     with metadata_path.open("r", encoding="utf-8") as handle:
         metadata = json.load(handle)
+    camera_names = metadata["camera_names"]
+    depth_thresholds = parse_view_depth_thresholds(depth_threshold, camera_names)
     point_stride = int(metadata["point_stride"])
     sources = (
         ("predicted", "predicted_rgbd.npz", "predicted_urdf_qpos"),
@@ -801,7 +832,8 @@ def postprocess_chunk_urdf(
         )
         valid_depth_masks = None
         if source == "predicted" and "depth_raw" in archive:
-            valid_depth_masks = archive["depth_raw"] >= depth_threshold
+            thresholds_v = np.asarray(depth_thresholds, dtype=np.float32)
+            valid_depth_masks = archive["depth_raw"] >= thresholds_v[None, :, None, None]
         save_pointcloud_sequence(
             chunk / source / "pointclouds",
             rgb,
@@ -813,16 +845,16 @@ def postprocess_chunk_urdf(
             action_offsets=archive["action_offsets"] if "action_offsets" in archive else None,
             robot_masks_t_vhw=masks,
             valid_depth_masks_t_vhw=valid_depth_masks,
-            camera_names=metadata["camera_names"],
+            camera_names=camera_names,
         )
         save_urdf_projection_masks(
-            chunk / source / "urdf_proj_mask", masks, metadata["camera_names"]
+            chunk / source / "urdf_proj_mask", masks, camera_names
         )
         np.savez_compressed(chunk / source / "robot_masks.npz", mask=masks)
     metadata["robot_split_status"] = "complete"
     metadata["robot_mask_depth_tolerance_m"] = depth_tolerance
     metadata["robot_mask_dilation_pixels"] = dilation_pixels
-    metadata["predicted_raw_depth_threshold"] = depth_threshold
+    metadata["predicted_raw_depth_thresholds"] = depth_thresholds
     metadata["robot_geometry_source"] = str(Path(robot_urdf).expanduser().resolve())
     json_dump(metadata_path, metadata)
 

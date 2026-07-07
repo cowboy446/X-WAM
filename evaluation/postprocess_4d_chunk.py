@@ -19,9 +19,12 @@ def main() -> None:
     parser.add_argument("--dilation-pixels", type=int, default=2)
     parser.add_argument(
         "--depth-threshold",
-        type=float,
-        default=0.0,
-        help="Minimum generated uint8 depth value used for predicted reconstruction",
+        type=str,
+        default="0,0,0",
+        help=(
+            "Comma-separated generated uint8 depth thresholds per view, "
+            "in metadata camera order"
+        ),
     )
     args = parser.parse_args()
     postprocess_chunk_urdf(

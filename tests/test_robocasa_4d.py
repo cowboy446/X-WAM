@@ -10,6 +10,7 @@ from evaluation.robocasa_4d import (
     backproject_rgbd,
     depth_buffer_repair_is_safe,
     fit_predicted_depth_to_metric,
+    parse_view_depth_thresholds,
     robocasa_depth_calibration_mask,
     save_pointcloud_sequence,
     save_urdf_projection_masks,
@@ -204,6 +205,14 @@ class RoboCasa4DTest(unittest.TestCase):
             )
             xyz = np.load(Path(tmp) / "frame_0000.npz")["xyz"]
             self.assertEqual(len(xyz), 2)
+
+    def test_parse_view_depth_thresholds_requires_one_per_view(self):
+        views = ["left", "right", "eye"]
+        self.assertEqual(parse_view_depth_thresholds("30,30,50", views), [30.0, 30.0, 50.0])
+        with self.assertRaisesRegex(ValueError, "one value per view"):
+            parse_view_depth_thresholds("50", views)
+        with self.assertRaisesRegex(ValueError, r"\[0, 255\]"):
+            parse_view_depth_thresholds("0,256,0", views)
 
     def test_save_urdf_projection_masks_by_camera(self):
         with tempfile.TemporaryDirectory() as tmp:

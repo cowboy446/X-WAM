@@ -130,8 +130,11 @@ applied to the whole chunk. Lossless projected masks are saved under
 `predicted/urdf_proj_mask/<camera>/` and
 `ground_truth/urdf_proj_mask/<camera>/` for the complete reconstructed sequences.
 Predicted point-cloud reconstruction additionally keeps only pixels whose raw
-generated uint8 depth is at least `--depth-threshold` (default `0`, disabled); this
-threshold does not restrict the background pixels used for depth calibration.
+generated uint8 depth is at least the per-view `--depth-threshold` value
+(default `0,0,0`, disabled for the three default views). Pass values in camera
+order, for example `--depth-threshold 30,30,50`; the number of thresholds must
+match the number of views. This threshold does not restrict the pixels used for
+depth calibration.
 
 After each rollout, all chunk point clouds are automatically indexed into one
 continuous timeline at `<rollout>_4d/timeline/manifest.json`. Adjacent duplicate
