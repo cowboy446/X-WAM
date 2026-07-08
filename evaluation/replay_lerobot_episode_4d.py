@@ -286,15 +286,9 @@ def make_env(args: argparse.Namespace, camera_names: list[str]):
     from evaluation.robocasa_client import create_env
 
     layout_and_style_ids = args.layout_and_style_ids
-    if layout_and_style_ids is None:
-        extra_meta = args.dataset_root / "extras" / episode_name(args.episode_index) / "ep_meta.json"
-        if extra_meta.exists():
-            meta = json.loads(extra_meta.read_text(encoding="utf-8"))
-            if "layout_id" in meta and "style_id" in meta:
-                layout_and_style_ids = ((int(meta["layout_id"]), int(meta["style_id"])),)
 
     def build(env_name: str):
-        return create_env(
+        kwargs = dict(
             env_name=env_name,
             robots=args.robots,
             camera_names=camera_names,
@@ -302,8 +296,10 @@ def make_env(args: argparse.Namespace, camera_names: list[str]):
             camera_heights=args.camera_height,
             seed=args.seed,
             render_onscreen=args.render_onscreen,
-            layout_and_style_ids=layout_and_style_ids,
         )
+        if layout_and_style_ids is not None:
+            kwargs["layout_and_style_ids"] = layout_and_style_ids
+        return create_env(**kwargs)
 
     requested_env = args.env_name or infer_env_name(args.dataset_root)
     try:
