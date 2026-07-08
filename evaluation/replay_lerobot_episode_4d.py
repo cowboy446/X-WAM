@@ -292,16 +292,36 @@ def make_env(args: argparse.Namespace, camera_names: list[str]):
             meta = json.loads(extra_meta.read_text(encoding="utf-8"))
             if "layout_id" in meta and "style_id" in meta:
                 layout_and_style_ids = ((int(meta["layout_id"]), int(meta["style_id"])),)
-    return create_env(
-        env_name=args.env_name or infer_env_name(args.dataset_root),
-        robots=args.robots,
-        camera_names=camera_names,
-        camera_widths=args.camera_width,
-        camera_heights=args.camera_height,
-        seed=args.seed,
-        render_onscreen=args.render_onscreen,
-        layout_and_style_ids=layout_and_style_ids,
-    )
+
+    def build(env_name: str):
+        return create_env(
+            env_name=env_name,
+            robots=args.robots,
+            camera_names=camera_names,
+            camera_widths=args.camera_width,
+            camera_heights=args.camera_height,
+            seed=args.seed,
+            render_onscreen=args.render_onscreen,
+            layout_and_style_ids=layout_and_style_ids,
+        )
+
+    requested_env = args.env_name or infer_env_name(args.dataset_root)
+    try:
+        env = build(requested_env)
+        args.resolved_env_name = requested_env
+        return env
+    except Exception as exc:
+        if args.env_name is not None or "not found" not in str(exc):
+            raise
+        fallback = "Kitchen"
+        print(
+            f"[replay] Env {requested_env!r} is not registered; using {fallback!r} "
+            "as a RoboCasa shell before restoring model.xml.gz and states.",
+            flush=True,
+        )
+        env = build(fallback)
+        args.resolved_env_name = fallback
+        return env
 
 
 def parse_layout_and_style(value: str | None):
@@ -397,6 +417,8 @@ def main() -> None:
     metadata = {
         "replay_source": "lerobot_robocasa",
         "replay_mode": args.replay_mode,
+        "requested_env_name": args.env_name or infer_env_name(args.dataset_root),
+        "resolved_env_name": getattr(args, "resolved_env_name", None),
         "dataset_root": str(args.dataset_root),
         "episode_index": args.episode_index,
         "episode_task": task,
