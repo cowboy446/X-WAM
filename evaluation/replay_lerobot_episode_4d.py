@@ -132,6 +132,30 @@ def load_states(extra_dir: Path) -> np.ndarray:
         return np.asarray(archive["states"], dtype=np.float64)
 
 
+def package_root(package_name: str) -> Path:
+    module = __import__(package_name)
+    return Path(module.__file__).resolve().parent
+
+
+def rewrite_recorded_xml_asset_paths(xml: str) -> str:
+    """Map absolute asset paths from the data-generation machine to this env."""
+    replacements = {
+        "robocasa": package_root("robocasa"),
+        "robosuite": package_root("robosuite"),
+    }
+    rewritten = xml
+    for package, root in replacements.items():
+        pattern = re.compile(
+            rf'(?P<prefix>["=])(?P<path>/[^"\s<>]*/{package}/{package})(?P<suffix>/[^"\s<>]*)'
+        )
+
+        def replace(match: re.Match) -> str:
+            return f"{match.group('prefix')}{root}{match.group('suffix')}"
+
+        rewritten = pattern.sub(replace, rewritten)
+    return rewritten
+
+
 def reset_env_to_recorded_initial_state(env: Any, extra_dir: Path, states: np.ndarray) -> None:
     """Restore the exact recorded MuJoCo model and first flattened state."""
     env.reset()
@@ -139,6 +163,7 @@ def reset_env_to_recorded_initial_state(env: Any, extra_dir: Path, states: np.nd
     if xml_gz.exists():
         with gzip.open(xml_gz, "rb") as handle:
             xml = handle.read().decode("utf-8")
+        xml = rewrite_recorded_xml_asset_paths(xml)
         if hasattr(env, "reset_from_xml_string"):
             env.reset_from_xml_string(xml)
         elif hasattr(env.sim, "reset_from_xml_string"):
