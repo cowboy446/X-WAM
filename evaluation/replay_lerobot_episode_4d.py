@@ -47,6 +47,30 @@ def infer_env_name(dataset_root: Path) -> str:
     return root.name
 
 
+def is_lerobot_root(path: Path) -> bool:
+    return (path / "data").is_dir() and (path / "meta").is_dir() and (path / "extras").is_dir()
+
+
+def resolve_lerobot_root(path: Path) -> Path:
+    """Accept either the LeRobot root itself or a parent that contains one."""
+    root = path.expanduser().resolve()
+    if is_lerobot_root(root):
+        return root
+    if is_lerobot_root(root / "lerobot"):
+        return root / "lerobot"
+    matches = sorted(candidate for candidate in root.glob("**/lerobot") if is_lerobot_root(candidate))
+    if len(matches) == 1:
+        return matches[0].resolve()
+    if len(matches) > 1:
+        raise ValueError(
+            f"Found multiple LeRobot roots under {root}; pass one explicitly:\n"
+            + "\n".join(f"  {match}" for match in matches[:20])
+        )
+    raise FileNotFoundError(
+        f"{root} is not a LeRobot root and no nested lerobot/ with data/, meta/, extras/ was found"
+    )
+
+
 def episode_name(index: int) -> str:
     return f"episode_{index:06d}"
 
@@ -294,7 +318,11 @@ def parse_layout_and_style(value: str | None):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("dataset_root", type=Path, help="LeRobot dataset root containing data/, meta/, extras/")
+    parser.add_argument(
+        "dataset_root",
+        type=Path,
+        help="LeRobot root containing data/, meta/, extras/, or a parent directory containing lerobot/",
+    )
     parser.add_argument("--episode-index", type=int, default=0)
     parser.add_argument("--env-name", default=None, help="RoboCasa env name; defaults to the task directory name")
     parser.add_argument("--output-root", type=Path, default=Path("eval_results/robocasa_lerobot_replay"))
@@ -320,7 +348,7 @@ def main() -> None:
     if args.point_stride < 1:
         raise ValueError("--point-stride must be >= 1")
 
-    args.dataset_root = args.dataset_root.expanduser().resolve()
+    args.dataset_root = resolve_lerobot_root(args.dataset_root)
     camera_names = [name.strip() for name in args.camera_names.split(",") if name.strip()]
     extra_dir = args.dataset_root / "extras" / episode_name(args.episode_index)
     states = load_states(extra_dir)
