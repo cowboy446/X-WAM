@@ -162,6 +162,18 @@ The archive contains every JSON below the task directory and only the PLY files
 referenced by its continuous timeline manifests. Omitting the output argument
 writes `<task>_4d_visualization.tar.gz` beside the task directory.
 
+To gzip all RGB files under every rollout's `predicted/rgb` and ground-truth
+`rgb` directories while preserving the same task-rooted directory structure:
+
+```bash
+scripts/package_rgb_task.sh \
+    eval_results/robocasa/<task> \
+    /path/to/<task>_rgb.tar.gz
+```
+
+Both `groundtruth` and `ground_truth` source directory names are supported.
+Omitting the output argument writes `<task>_rgb.tar.gz` beside the task directory.
+
 To evaluate all 24 tasks in parallel:
 
 ```bash
